@@ -817,12 +817,9 @@ def list_experiment_reports() -> dict:
 def read_experiment_report(experiment: str | None = None) -> dict:
     """The report Markdown for `experiment` (default: the current one).
 
-    Falls back to building it on the fly when ``report.md`` has not been
-    written yet -- the file only appears once the report panel has rendered
-    once, and a chat question should not depend on whether the user happened
-    to have that dock open.
+    Rendered on demand: ``report.jsonl`` is a machine store, and no Markdown
+    is kept on disk. Read-only -- see the ``persist=False`` note below.
     """
-    from B_PILOT import experiment_history as bpilot_history
     from B_PILOT import report_builder as bpilot_report_builder
     from B_PILOT import report_store as bpilot_report_store
 
@@ -833,15 +830,15 @@ def read_experiment_report(experiment: str | None = None) -> dict:
         if not experiment:
             return {"error": "No experiment history exists for this beamline yet."}
 
-    markdown = bpilot_report_store.read_markdown(beamline, experiment)
-    if not markdown.strip():
-        markdown = bpilot_report_builder.render_markdown(
-            bpilot_history.read_entries(beamline, experiment),
-            bpilot_report_store.read_events(beamline, experiment),
-            experiment=experiment,
-            beamline=beamline,
-            title=cfg.get("report_title") or "",
-        )
+    # persist=False: answering a question in chat must never write to the
+    # record. Any run not yet reconciled into report.jsonl is still folded in
+    # for this read, so the answer is current either way.
+    markdown = bpilot_report_builder.render_markdown(
+        bpilot_report_builder.collect(beamline, experiment, persist=False),
+        experiment=experiment,
+        beamline=beamline,
+        title=cfg.get("report_title") or "",
+    )
 
     truncated = len(markdown) > _REPORT_MAX_CHARS
     if truncated:

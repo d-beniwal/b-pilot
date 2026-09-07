@@ -92,6 +92,9 @@ class SnapshotDialog(QtWidgets.QDialog):
         self._console = console
         self._rows: list[list[str]] = []
         self._token = 0
+        # Guards the group<->reading check cascade against re-entering itself:
+        # setCheckState emits itemChanged, which is the very signal driving it.
+        self._syncing = False
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -109,6 +112,9 @@ class SnapshotDialog(QtWidgets.QDialog):
         self._tree.setColumnWidth(0, S.px(200))
         layout.addWidget(self._tree, 1)
         self._populate()
+        # Connected after populating, so seeding the initial check states does
+        # not fire the cascade once per row.
+        self._tree.itemChanged.connect(self._on_item_changed)
 
         self._title = QtWidgets.QLineEdit()
         self._title.setPlaceholderText("Snapshot title (optional), e.g. 'after realignment'")
@@ -159,6 +165,45 @@ class SnapshotDialog(QtWidgets.QDialog):
                 child.setFlags(child.flags() | QtCore.Qt.ItemIsUserCheckable)
                 child.setCheckState(0, QtCore.Qt.Checked)
                 child.setData(0, QtCore.Qt.UserRole, item)
+
+    def _on_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
+        """Keep a group and its readings in step, in both directions.
+
+        Ticking a group ticks every reading under it (and unticking clears
+        them) -- with several groups configured, that is the difference between
+        one click and a dozen. Ticking readings individually leaves the group
+        showing partially-checked, so the header still tells the truth about
+        what is selected.
+        """
+        if column != 0 or self._syncing:
+            return
+        self._syncing = True
+        try:
+            if item.childCount():
+                state = item.checkState(0)
+                if state == QtCore.Qt.PartiallyChecked:
+                    return  # only ever set by this method, never by a click
+                for j in range(item.childCount()):
+                    item.child(j).setCheckState(0, state)
+                return
+            parent = item.parent()
+            if parent is None:
+                return
+            checked = sum(
+                1
+                for j in range(parent.childCount())
+                if parent.child(j).checkState(0) == QtCore.Qt.Checked
+            )
+            parent.setCheckState(
+                0,
+                QtCore.Qt.Checked
+                if checked == parent.childCount()
+                else QtCore.Qt.Unchecked
+                if checked == 0
+                else QtCore.Qt.PartiallyChecked,
+            )
+        finally:
+            self._syncing = False
 
     def _selected_items(self) -> list[dict]:
         out: list[dict] = []
@@ -243,12 +288,14 @@ class SnapshotDialog(QtWidgets.QDialog):
 
     def _preview(self) -> None:
         """Show what was actually read, so nothing is inserted unseen."""
+        self._syncing = True   # these rows are a result table, not a selection
         self._tree.clear()
         self._tree.setHeaderLabels(["Reading", "Value"])
         for label, value, units in self._rows:
             QtWidgets.QTreeWidgetItem(
                 self._tree, [label, f"{value} {units}".strip()]
             )
+        self._syncing = False
 
     # --------------------------------------------------------------- result --
 

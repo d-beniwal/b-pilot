@@ -1,39 +1,33 @@
-"""Storage for the per-experiment **experiment report** -- B-PILOT's lab record.
+"""The experiment report's master file -- B-PILOT's lab record for a beamtime.
 
-A report is scoped to an *experiment*, exactly like :mod:`experiment_history`,
-and lives in that same directory so the whole record of a beamtime travels as
-one folder::
+**One file per experiment**, sitting next to the kernel history it is built
+from, so the whole record of a beamtime travels as a single folder::
 
-    <session_dir>/<beamline>/experiments/<safe-name>/report_events.jsonl
-    <session_dir>/<beamline>/experiments/<safe-name>/report.md
+    <session_dir>/<beamline>/experiments/<safe-name>/history.jsonl   (kernel transcript)
+    <session_dir>/<beamline>/experiments/<safe-name>/report.jsonl    (the report)
 
-**Two files, one artifact.** ``report.md`` is the thing a human reads, keeps,
-and hands to a collaborator -- but it is *generated*, never appended to. Only
-``report_events.jsonl`` is authored:
+``report.jsonl`` is the master. Everything the report contains lives in it --
+plan runs, notes, beamline snapshots, section headings, blocks accepted from
+AutoPILOT -- so it is self-contained and can be rendered without consulting
+anything else. It is **operated on only through B-PILOT**: it is a machine
+store, not a document to hand-edit, and the readable artifact is produced on
+demand by the Report panel's Export button (Markdown or HTML, saved wherever
+the user chooses). Nothing generated is left lying in the experiment folder to
+be mistaken for the master.
 
-* ``report_events.jsonl`` holds the items a person adds -- notes, beamline
-  snapshots, headings, agent-written blocks. Append-only.
-* ``report.md`` is rewritten from scratch by :mod:`report_builder`, merging
-  those events with the plan runs it derives from ``history.jsonl``.
+**Why append-only rather than a rewritten document.** A run's outcome is not
+known when it starts, so a record has to be revisable; and the writer may be
+interrupted at any moment by a kernel restart or a closed GUI. An append log
+gets both: a revision is a new line that supersedes an earlier one with the
+same ``ts`` (see :func:`report_builder.collect`), and a torn final line costs
+one entry rather than the file. Each append is a **single** ``write()`` of one
+JSON line, well under ``PIPE_BUF``, so concurrent writers cannot interleave --
+the same lock-free reasoning as :func:`experiment_history.append_entry`, not
+the ``flock`` pattern the mutable stores use (``queue_store``,
+``det_startup_state``).
 
-The split exists because a run's *outcome* is not known when it starts, and
-because ``history.jsonl`` is the only record that also captures runs dispatched
-by the detached queue runner while the GUI was closed. Deriving runs and
-merging by timestamp keeps the report complete and regenerable; keeping manual
-items in their own append-only log means nothing a person typed can ever be
-lost to a regeneration.
-
-Storage conventions are inherited deliberately, not reinvented:
-
-* Events are appended with a **single** ``write()`` of one JSON line, well
-  under ``PIPE_BUF``, so concurrent appenders cannot interleave -- the same
-  lock-free reasoning as :func:`experiment_history.append_entry`, rather than
-  the ``flock`` pattern used by the mutable stores (``queue_store``,
-  ``det_startup_state``).
-* ``report.md`` is a whole-file rewrite, so it uses ``tmp`` + :func:`os.replace`
-  -- the atomic-write pattern from :func:`config._write_json`.
-* Every write is best-effort (``try/except OSError: pass``). Failing to record
-  a note must never take down a run in progress.
+Every write is best-effort (``try/except OSError: pass``). Failing to record a
+note must never take down a run in progress.
 """
 from __future__ import annotations
 
@@ -43,26 +37,35 @@ import time
 
 from . import experiment_history as eh
 
-# Event kinds written to report_events.jsonl. Runs are NOT here -- they are
-# derived from history.jsonl by report_builder, so that queue-dispatched runs
-# and runs from a previous GUI session are picked up just the same.
-NOTE = "note"            # free prose the user typed
+# Entry kinds. `run` records are reconciled in from the kernel's own
+# history.jsonl by report_builder; the rest are authored by a person.
+RUN = "run"              # one plan invocation, with its outcome
+NOTE = "note"            # free prose
 SNAPSHOT = "snapshot"    # a captured table of live device values
-HEADING = "heading"      # a user-inserted section break
+HEADING = "heading"      # a section break
 AGENT = "agent"          # a block a person accepted from AutoPILOT
 
-EVENTS_FILENAME = "report_events.jsonl"
-MARKDOWN_FILENAME = "report.md"
+REPORT_FILENAME = "report.jsonl"
+
+# Pre-release name of the same file, from before runs were folded into it.
+# Renamed rather than left behind so a report started on an early build of
+# this branch keeps its notes instead of silently starting empty.
+_LEGACY_FILENAME = "report_events.jsonl"
 
 
-def events_path(beamline: str, experiment: str) -> str:
-    """Path to the append-only manual-event log for one experiment."""
-    return os.path.join(eh.experiment_dir(beamline, experiment), EVENTS_FILENAME)
+def report_path(beamline: str, experiment: str) -> str:
+    """Path to the master report file for one experiment."""
+    return os.path.join(eh.experiment_dir(beamline, experiment), REPORT_FILENAME)
 
 
-def markdown_path(beamline: str, experiment: str) -> str:
-    """Path to the generated report document for one experiment."""
-    return os.path.join(eh.experiment_dir(beamline, experiment), MARKDOWN_FILENAME)
+def _migrate_legacy(beamline: str, experiment: str) -> None:
+    legacy = os.path.join(eh.experiment_dir(beamline, experiment), _LEGACY_FILENAME)
+    target = report_path(beamline, experiment)
+    try:
+        if os.path.isfile(legacy) and not os.path.exists(target):
+            os.replace(legacy, target)
+    except OSError:
+        pass
 
 
 def current_experiment(beamline: str) -> str:
@@ -82,31 +85,23 @@ def append_event(
     experiment: str,
     kind: str,
     *,
-    text: str = "",
-    title: str = "",
-    rows: list | None = None,
     ts: float | None = None,
+    **fields,
 ) -> dict | None:
-    """Append one manual report event; return it, or ``None`` if it was empty.
+    """Append one entry to the master file; return it, or ``None`` on failure.
 
-    `rows` carries a snapshot's captured values as ``[[label, value, units],
-    ...]`` -- a list of lists rather than tuples because that is what survives
-    a JSON round trip unchanged.
+    `fields` are stored verbatim, so each kind carries what it needs: a
+    snapshot's ``rows``, a run's ``plan_name``/``ok``/``end_ts``, a note's
+    ``text``. They must be JSON-serialisable -- snapshot rows are lists of
+    lists rather than tuples for exactly that reason.
     """
-    if not (text or title or rows):
-        return None
-    event = {
-        "ts": ts if ts is not None else time.time(),
-        "kind": kind,
-        "title": title,
-        "text": text,
-        "rows": rows or [],
-    }
+    event = {"ts": ts if ts is not None else time.time(), "kind": kind, **fields}
     # Reuse the history store's meta.json bootstrap so a report started before
     # any kernel activity still records the experiment's real display name.
     eh._ensure_meta(beamline, experiment)  # noqa: SLF001
+    _migrate_legacy(beamline, experiment)
     try:
-        with open(events_path(beamline, experiment), "a", encoding="utf-8") as fh:
+        with open(report_path(beamline, experiment), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(event) + "\n")
     except OSError:
         return None
@@ -114,14 +109,19 @@ def append_event(
 
 
 def read_events(beamline: str, experiment: str) -> list[dict]:
-    """All manual events for one experiment, oldest first.
+    """Every entry in the master file, in file (oldest-first) order.
+
+    Superseding entries are *not* collapsed here -- that is
+    :func:`report_builder.collect`'s job, since it is the one that knows a
+    later ``run`` entry replaces an earlier one with the same ``ts``.
 
     Malformed lines (a write torn by a crash) are skipped rather than aborting
     the read -- same tolerance as :func:`experiment_history.read_entries`.
     """
+    _migrate_legacy(beamline, experiment)
     events: list[dict] = []
     try:
-        with open(events_path(beamline, experiment), encoding="utf-8", errors="replace") as fh:
+        with open(report_path(beamline, experiment), encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -135,43 +135,18 @@ def read_events(beamline: str, experiment: str) -> list[dict]:
     return events
 
 
-def write_markdown(beamline: str, experiment: str, markdown: str) -> bool:
-    """Atomically (re)write the generated report document. True if it landed."""
-    path = markdown_path(beamline, experiment)
-    tmp = path + ".tmp"
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(markdown)
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        return False
-
-
-def read_markdown(beamline: str, experiment: str) -> str:
-    """The generated report document, or ``""`` if it has not been built yet."""
-    try:
-        with open(markdown_path(beamline, experiment), encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
-        return ""
-
-
-def source_sizes(beamline: str, experiment: str) -> tuple[int, float]:
-    """``(history bytes, events mtime)`` -- the cheap change-detection tuple.
+def source_state(beamline: str, experiment: str) -> tuple[int, int]:
+    """``(history bytes, report bytes)`` -- the cheap change-detection tuple.
 
     The report panel polls this instead of re-reading and re-rendering on every
-    tick; a rebuild is only worth doing when one of the two inputs actually
-    moved. Missing files read as ``0``, so a report with no activity yet is a
-    stable, non-changing value rather than a repeated rebuild.
+    tick; work is only worth doing when one of the two files actually grew.
+    Missing files read as ``0``, so an experiment with no activity yet is a
+    stable value rather than a repeated rebuild.
     """
-    try:
-        hist = os.path.getsize(eh.history_path(beamline, experiment))
-    except OSError:
-        hist = 0
-    try:
-        mtime = os.path.getmtime(events_path(beamline, experiment))
-    except OSError:
-        mtime = 0.0
-    return hist, mtime
+    sizes = []
+    for path in (eh.history_path(beamline, experiment), report_path(beamline, experiment)):
+        try:
+            sizes.append(os.path.getsize(path))
+        except OSError:
+            sizes.append(0)
+    return sizes[0], sizes[1]

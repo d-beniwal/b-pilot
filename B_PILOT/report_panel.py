@@ -10,12 +10,16 @@ The structure mirrors ``AutoPILOT/autopilot/gui/chat_panel.py``'s
 ``main_window.py`` already knows how to host (allowed areas, ribbon tab,
 menu toggle, config-backed visibility).
 
-**What updates it.** Plan runs are not pushed here by the GUI; they are derived
-from ``history.jsonl`` by :mod:`report_builder`. That indirection is what makes
-the panel show plans dispatched by the *detached queue runner*, and plans that
-ran while the GUI was closed, with no extra plumbing. The panel just polls the
-two source files for a size/mtime change (:func:`report_store.source_sizes`)
-and rebuilds when one of them moved.
+**What updates it.** Plan runs are not pushed here by the GUI; they are folded
+out of ``history.jsonl`` and reconciled into the report's master file by
+:func:`report_builder.collect`. That indirection is what makes the panel show
+plans dispatched by the *detached queue runner*, and plans that ran while the
+GUI was closed, with no extra plumbing. The panel just polls both files for a
+size change (:func:`report_store.source_state`) and rebuilds when one moved.
+
+Nothing rendered is written to disk. ``report.jsonl`` is the master and the
+only thing B-PILOT keeps; Markdown and HTML exist only in this view and in
+whatever the Export button writes where the user asks for it.
 """
 from __future__ import annotations
 
@@ -48,7 +52,7 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         self._experiment: str | None = None
         self._console = None          # set by main_window via set_console()
         self._console_ready = False
-        self._sources: tuple[int, float] = (-1, -1.0)
+        self._sources: tuple[int, int] = (-1, -1)
 
         body = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(body)
@@ -196,7 +200,7 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             self._view.clear()
             return
         self._subject.setText(f"{self._experiment} · {self._beamline}")
-        self._subject.setToolTip(rs.markdown_path(self._beamline, self._experiment))
+        self._subject.setToolTip(rs.report_path(self._beamline, self._experiment))
         self.refresh()
         self._timer.start()
 
@@ -207,25 +211,29 @@ class ReportDockWidget(QtWidgets.QDockWidget):
     def _poll(self) -> None:
         if not (self._beamline and self._experiment):
             return
-        sources = rs.source_sizes(self._beamline, self._experiment)
+        sources = rs.source_state(self._beamline, self._experiment)
         if sources != self._sources:
             self.refresh()
 
-    def refresh(self) -> None:
-        """Rebuild ``report.md`` from its two sources and re-render the view."""
-        if not (self._beamline and self._experiment):
-            return
-        from . import experiment_history as eh
-
-        self._sources = rs.source_sizes(self._beamline, self._experiment)
-        markdown = report_builder.render_markdown(
-            eh.read_entries(self._beamline, self._experiment),
-            rs.read_events(self._beamline, self._experiment),
+    def _markdown(self, *, persist: bool = True) -> str:
+        """The report as Markdown, reconciling new runs into the master file."""
+        return report_builder.render_markdown(
+            report_builder.collect(self._beamline, self._experiment, persist=persist),
             experiment=self._experiment,
             beamline=self._beamline,
             title=config.get("report_title") or "",
         )
-        rs.write_markdown(self._beamline, self._experiment, markdown)
+
+    def refresh(self) -> None:
+        """Reconcile new runs into ``report.jsonl`` and re-render the view."""
+        if not (self._beamline and self._experiment):
+            return
+        # Read the source state BEFORE collecting: collect() appends the run
+        # entries it reconciles, so sampling afterwards would store a size the
+        # next poll immediately disagrees with and rebuild on every tick.
+        self._sources = rs.source_state(self._beamline, self._experiment)
+        markdown = self._markdown()
+        self._sources = rs.source_state(self._beamline, self._experiment)
 
         bar = self._view.verticalScrollBar()
         at_end = self._follow.isChecked()
@@ -320,7 +328,7 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         )
         if not path:
             return
-        markdown = rs.read_markdown(self._beamline, self._experiment)
+        markdown = self._markdown()
         wants_html = selected.startswith("HTML") or path.lower().endswith(".html")
         if wants_html and not path.lower().endswith(".html"):
             path += ".html"

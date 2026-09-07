@@ -1,22 +1,27 @@
-"""Build the experiment report's Markdown from the two sources that feed it.
+"""Fill the experiment report's master file, and render it.
 
 Qt-free on purpose (same reasoning as :mod:`databroker_access`): everything
 here is pure functions over plain dicts, so the interesting logic -- run
-boundaries, status, ordering -- is testable without a display, a kernel, or a
-beamline.
+boundaries, status, reconciliation, ordering -- is testable without a display,
+a kernel, or a beamline.
 
-Two inputs, merged by timestamp:
+**Runs are reconciled, not pushed.** The GUI never tells this module that a
+plan ran. :func:`collect` folds runs out of the kernel's own ``history.jsonl``
+and appends any it has not already recorded into ``report.jsonl``. That
+indirection is the whole point: ``session_recorder`` watches the kernel's IOPub
+channel rather than the GUI, so a plan dispatched by the *detached queue
+runner*, by another attached client, or during a session three restarts ago is
+already in that file -- and reconciling picks all of them up the next time the
+report is opened, with no extra plumbing anywhere.
 
-* **Plan runs**, folded out of :mod:`experiment_history`'s ``history.jsonl``.
-  Deriving them rather than recording them separately is what makes the report
-  complete: the detached queue runner's plans and anything run while the GUI
-  was closed land in that file just the same, because the recorder subprocess
-  watches the kernel's IOPub channel, not the GUI.
-* **Manual events**, from :mod:`report_store` -- notes, snapshots, headings.
+Once reconciled, the report is self-contained: :func:`render_markdown` reads
+only ``report.jsonl``.
 
-One wrinkle worth knowing about: a run's *outcome* is never in the ``input``
-entry that starts it. It has to be inferred from what follows -- which is
-exactly what :func:`fold_runs` does.
+Two wrinkles worth knowing about. A run's *outcome* is never in the ``input``
+entry that starts it -- it has to be inferred from what follows, which is what
+:func:`fold_runs` does. And because that outcome arrives late, a run record
+has to be revisable in an append-only file: a later entry with the same ``ts``
+supersedes an earlier one, and :func:`collect` collapses them.
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ import ast
 import re
 import time
 
+from . import experiment_history as eh
 from . import report_store as rs
 
 # Plan name inside an ``RE(<plan>(...))`` call. Small independent copies of
@@ -118,6 +124,11 @@ def fold_runs(entries: list[dict]) -> list[dict]:
     honest about it, which is why the caller labels it as approximate. A run
     that printed nothing at all has ``end_ts is None``.
 
+    ``closed`` says whether the record is final: True once a later ``input`` or
+    ``marker`` has ended the run, meaning no further output can be attributed
+    to it. :func:`collect` uses it to decide when a run is worth writing again,
+    which is what bounds the master file to at most two entries per run.
+
     Non-``RE()`` input (a mode-button ``put()``, an ad-hoc console command) is
     deliberately not a run: it would bury the plans in noise. It is still in
     the Session log tab, which is where that belongs.
@@ -131,7 +142,9 @@ def fold_runs(entries: list[dict]) -> list[dict]:
         ts = entry.get("ts") or 0.0
 
         if kind in ("input", "marker"):
-            current = None  # whatever was open is now closed
+            if current is not None:
+                current["closed"] = True
+            current = None
             if kind != "input":
                 continue
             text = entry.get("text") or ""
@@ -147,6 +160,7 @@ def fold_runs(entries: list[dict]) -> list[dict]:
                 "ok": True,
                 "error": "",
                 "notes": notes,
+                "closed": False,
             }
             runs.append(current)
             continue
@@ -275,21 +289,86 @@ def _event_markdown(event: dict) -> str:
     return "\n".join(out)
 
 
+# Fields compared to decide whether a persisted run record is out of date.
+# `end_ts` is deliberately NOT among them: it advances with every line a
+# chatty plan prints, and writing a new entry each time would grow the master
+# file by thousands of lines over one long scan. It is picked up by the
+# closing write instead, and the live view always shows the fresh fold anyway.
+_RUN_REWRITE_FIELDS = ("closed", "ok", "error")
+
+
+def collect(beamline: str, experiment: str, *, persist: bool = True) -> list[dict]:
+    """Everything the report contains, with new runs reconciled into the file.
+
+    Folds :mod:`experiment_history`'s entries into runs and writes any that
+    ``report.jsonl`` does not already hold. Returns the complete, de-duplicated
+    entry list to render.
+
+    Two entries per run at most: one when it is first seen, one when it closes
+    and its outcome is final (see ``_RUN_REWRITE_FIELDS``). A later entry
+    supersedes an earlier one with the same ``ts``.
+
+    `persist=False` reads without writing anything -- the mode AutoPILOT's
+    read-only report tool uses, so that answering a question in chat never
+    mutates the record.
+    """
+    stored = rs.read_events(beamline, experiment)
+    persisted = {
+        e.get("ts"): e for e in stored if e.get("kind") == rs.RUN and e.get("ts") is not None
+    }
+
+    fresh: list[dict] = []
+    for run in fold_runs(eh.read_entries(beamline, experiment)):
+        old = persisted.get(run["ts"])
+        if persist and (
+            old is None
+            or any(old.get(f) != run[f] for f in _RUN_REWRITE_FIELDS)
+        ):
+            rs.append_event(
+                beamline,
+                experiment,
+                rs.RUN,
+                ts=run["ts"],
+                **{k: v for k, v in run.items() if k != "ts"},
+            )
+        # Always overlay the freshly folded version, persisted or not: it
+        # carries the newest end_ts, so a run in progress shows a live
+        # duration rather than whatever was true when it was first written.
+        fresh.append({"kind": rs.RUN, **run})
+
+    return _collapse(stored, fresh)
+
+
+def _collapse(stored: list[dict], fresh: list[dict]) -> list[dict]:
+    """One entry per run (the newest wins); every authored entry kept."""
+    runs: dict = {}
+    others: list[dict] = []
+    for event in list(stored) + list(fresh):
+        if event.get("kind") == rs.RUN and event.get("ts") is not None:
+            runs[event["ts"]] = event
+        elif event.get("kind") != rs.RUN:
+            others.append(event)
+    return others + list(runs.values())
+
+
 def render_markdown(
-    entries: list[dict],
     events: list[dict],
     *,
     experiment: str,
     beamline: str,
     title: str = "",
 ) -> str:
-    """The whole report document, built from scratch.
+    """The whole report document, rendered from the master file's entries.
 
-    `entries` are ``history.jsonl`` entries and `events` are
-    :mod:`report_store` events; both may be in any order.
+    `events` is what :func:`collect` returns -- runs and authored entries
+    together, in any order.
     """
-    runs = fold_runs(entries)
-    loose = attach_notes(runs, events)
+    runs = sorted(
+        (e for e in events if e.get("kind") == rs.RUN), key=lambda r: r.get("ts") or 0.0
+    )
+    for run in runs:  # tolerate an entry written by an older build
+        run.setdefault("notes", [])
+    loose = attach_notes(runs, [e for e in events if e.get("kind") != rs.RUN])
 
     items: list[tuple[float, str, dict]] = [(r["ts"], "run", r) for r in runs]
     items += [(e.get("ts") or 0.0, "event", e) for e in loose]
@@ -299,8 +378,9 @@ def render_markdown(
 
     started = items[0][0] if items else time.time()
     out = [
-        "<!-- Generated by B-PILOT. Add notes and snapshots from the Report",
-        "     panel; hand edits here are overwritten on the next rebuild. -->",
+        "<!-- Rendered by B-PILOT from the experiment's report.jsonl, which is",
+        "     the live record. This copy is a point-in-time snapshot: it is not",
+        "     updated, and editing it changes nothing on the instrument. -->",
         "",
         f"# {title or experiment}",
         "",
