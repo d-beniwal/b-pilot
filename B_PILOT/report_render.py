@@ -71,14 +71,29 @@ def _heading_html(level: int, text: str) -> str:
 
 
 def _code_html(lines: list[str]) -> str:
-    """A fenced code block, as a one-cell shaded table (see module docstring)."""
-    body = html.escape("\n".join(lines))
+    """A fenced code block, as a one-cell shaded table (see module docstring).
+
+    Rendered as a wrapping ``<div>``, **not** a ``<pre>``. A real
+    ``RE(mpe_step_grid_scan(...))`` call with a dozen arguments is far wider
+    than a docked panel, and Qt's rich-text engine ignores
+    ``white-space:pre-wrap`` inside a ``<pre>`` (verified by pixel grab: the
+    line stayed clipped and the whole document grew a horizontal scrollbar).
+    So newlines become ``<br>`` and leading indentation becomes ``&nbsp;``,
+    which wraps like ordinary text while still preserving the shape of the
+    code.
+    """
+    rendered = []
+    for line in lines:
+        escaped = html.escape(line)
+        indent = len(line) - len(line.lstrip(" "))
+        rendered.append("&nbsp;" * indent + escaped.lstrip(" ") if indent else escaped)
     return (
         f'<table width="100%" cellspacing="0" cellpadding="6" '
-        f'style="background-color:{S.INPUT_BG}; border:1px solid {S.BORDER}; '
-        f'margin:{S.px(4)}px 0;"><tr><td>'
-        f'<pre style="font-family:{S.MONO_CSS}; color:{S.CMD_RE}; margin:0;">{body}</pre>'
-        f"</td></tr></table>"
+        f'style="margin:{S.px(4)}px 0;"><tr>'
+        f'<td style="background-color:{S.INPUT_BG}; border:1px solid {S.BORDER};">'
+        f'<div style="font-family:{S.MONO_CSS}; color:{S.CMD_RE};">'
+        + "<br>".join(rendered)
+        + "</div></td></tr></table>"
     )
 
 
@@ -87,8 +102,9 @@ def _quote_html(lines: list[str]) -> str:
     body = "<br>".join(_inline(ln) for ln in lines)
     return (
         f'<table width="100%" cellspacing="0" cellpadding="6" '
-        f'style="background-color:{S.ALT_ROW_BG}; border-left:3px solid {S.ACCENT}; '
-        f'margin:{S.px(4)}px 0;"><tr><td>'
+        f'style="margin:{S.px(4)}px 0;"><tr>'
+        f'<td style="background-color:{S.ALT_ROW_BG}; '
+        f'border-left:{S.px(3)}px solid {S.ACCENT};">'
         f'<span style="color:{S.TEXT};">{body}</span></td></tr></table>'
     )
 
