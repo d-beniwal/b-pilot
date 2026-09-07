@@ -155,6 +155,7 @@ class ConfigDialog(QtWidgets.QDialog):
             ("Scan blocks", self._page(self._build_scan_blocks_card())),
             ("Queue Backend", self._page(self._build_queue_backend_card())),
             ("Data Viewer", self._page(self._build_data_viewer_card())),
+            ("Reports", self._page(self._build_reports_card())),
             ("Appearance", self._page(
                 self._build_appearance_card(), self._build_autopilot_card()
             )),
@@ -1184,6 +1185,199 @@ class ConfigDialog(QtWidgets.QDialog):
 
     # ── AutoPILOT (optional AI chat dock) ────────────────────────────────────────
 
+    def _build_reports_card(self) -> QtWidgets.QWidget:
+        """Experiment Report settings: the dock toggle, its title, and the
+        readings its Snapshot button offers."""
+        card = S.make_card("Experiment Report")
+
+        self._report_enabled = QtWidgets.QCheckBox("Show the Experiment Report panel")
+        self._report_enabled.setToolTip(
+            "A live lab record for the running experiment, built from the "
+            "plans that run plus the notes and snapshots you add. Takes "
+            "effect immediately on Save, no restart needed."
+        )
+        card.body.addWidget(self._report_enabled)
+
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.addWidget(S.LabelRight("Report title:"))
+        self._report_title = QtWidgets.QLineEdit()
+        self._report_title.setPlaceholderText("(blank — use the experiment name)")
+        self._report_title.setToolTip(
+            "Heading at the top of the report, e.g. 'HEDM — Ni625 sample B'."
+        )
+        title_row.addWidget(self._report_title, 1)
+        card.body.addLayout(title_row)
+
+        note = QtWidgets.QLabel(
+            "Snapshot readings. Each is evaluated <b>in the running kernel</b> "
+            "when you press Snapshot — B-PILOT never opens an EPICS channel "
+            "itself. <b>Kind</b> matters: the kernel's reply is decoded with "
+            "<tt>ast.literal_eval</tt>, so a value that isn't already a Python "
+            "literal (an ophyd device, a numpy scalar) reads as blank unless "
+            "it is coerced. Use <tt>float</tt> for positions and readbacks."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {S.MUTED};")
+        card.body.addWidget(note)
+
+        self._report_snapshots = QtWidgets.QTreeWidget()
+        self._report_snapshots.setHeaderLabels(
+            ["Group / Label", "Expression", "Kind", "Units"]
+        )
+        self._report_snapshots.setColumnWidth(0, S.px(160))
+        self._report_snapshots.setColumnWidth(1, S.px(220))
+        self._report_snapshots.setColumnWidth(2, S.px(60))
+        self._report_snapshots.setMinimumHeight(S.px(200))
+        self._report_snapshots.setEditTriggers(
+            QtWidgets.QAbstractItemView.DoubleClicked
+            | QtWidgets.QAbstractItemView.SelectedClicked
+        )
+        card.body.addWidget(self._report_snapshots)
+
+        row = QtWidgets.QHBoxLayout()
+        for text, tip, slot in (
+            ("+ Group", "Add a new group of readings.", self._report_add_group),
+            ("+ Reading", "Add a reading to the selected group.", self._report_add_reading),
+            ("Add from devices…", "Pick motors from this profile's device catalog.",
+             self._report_add_from_devices),
+            ("Remove", "Remove the selected row.", self._report_remove_row),
+        ):
+            btn = QtWidgets.QPushButton(text)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        row.addStretch(1)
+        card.body.addLayout(row)
+        return card
+
+    # -- snapshot table helpers ---------------------------------------------
+
+    _REPORT_KINDS = ("float", "int", "str", "bool", "raw")
+
+    @staticmethod
+    def _report_make_reading(parent, label="", expr="", kind="float", units=""):
+        item = QtWidgets.QTreeWidgetItem(parent, [label, expr, kind, units])
+        item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
+        return item
+
+    def _report_selected_group(self) -> QtWidgets.QTreeWidgetItem | None:
+        """The group a new reading should go into: the selected group, the
+        selected reading's parent, or the last group as a fallback."""
+        item = self._report_snapshots.currentItem()
+        if item is not None:
+            return item.parent() or item
+        count = self._report_snapshots.topLevelItemCount()
+        return self._report_snapshots.topLevelItem(count - 1) if count else None
+
+    def _report_add_group(self) -> None:
+        name, ok = QtWidgets.QInputDialog.getText(self, "New group", "Group name:")
+        if not (ok and name.strip()):
+            return
+        group = QtWidgets.QTreeWidgetItem(self._report_snapshots, [name.strip(), "", "", ""])
+        group.setFlags(group.flags() | QtCore.Qt.ItemIsEditable)
+        group.setExpanded(True)
+        self._report_snapshots.setCurrentItem(group)
+
+    def _report_add_reading(self) -> None:
+        group = self._report_selected_group()
+        if group is None:
+            QtWidgets.QMessageBox.information(
+                self, "No group", "Add a group first, then add readings to it."
+            )
+            return
+        item = self._report_make_reading(group, "new reading", "", "float", "")
+        group.setExpanded(True)
+        self._report_snapshots.setCurrentItem(item)
+        self._report_snapshots.editItem(item, 0)
+
+    def _report_add_from_devices(self) -> None:
+        """Offer the motors this profile's OFFLINE device discovery found.
+
+        Names come from `device_source`'s static AST scan, so the list can only
+        contain devices that really exist in this profile's search paths -- far
+        safer than hand-typing a name that silently reads back blank. Axes are
+        qualified the same way `skeleton_widgets.MotorAxisPicker` does.
+        """
+        catalog = device_source.get_catalog()
+        targets: list[str] = []
+        for name in catalog.names_for("motor"):
+            axes = catalog.axes_for(name)
+            targets.extend(f"{name}.{axis}" for axis in axes) if axes else targets.append(name)
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No motors found",
+                "This profile's device search paths turned up no motors. "
+                "Set them in Configuration -> Devices first.",
+            )
+            return
+        picked, ok = QtWidgets.QInputDialog.getItem(
+            self, "Add reading from device catalog", "Motor:", targets, 0, False
+        )
+        if not (ok and picked):
+            return
+        group = self._report_selected_group()
+        if group is None:
+            group = QtWidgets.QTreeWidgetItem(self._report_snapshots, ["Motors", "", "", ""])
+            group.setFlags(group.flags() | QtCore.Qt.ItemIsEditable)
+        # `.position` is the ophyd-wide readback property for a positioner and
+        # avoids guessing between user_readback / readback / .get() shapes.
+        item = self._report_make_reading(group, picked, f"{picked}.position", "float", "mm")
+        group.setExpanded(True)
+        self._report_snapshots.setCurrentItem(item)
+
+    def _report_remove_row(self) -> None:
+        item = self._report_snapshots.currentItem()
+        if item is None:
+            return
+        parent = item.parent()
+        if parent is None:
+            self._report_snapshots.takeTopLevelItem(
+                self._report_snapshots.indexOfTopLevelItem(item)
+            )
+        else:
+            parent.removeChild(item)
+
+    def _report_load_snapshots(self, groups: list) -> None:
+        self._report_snapshots.clear()
+        for group in groups or []:
+            node = QtWidgets.QTreeWidgetItem(
+                self._report_snapshots, [group.get("name") or "Readings", "", "", ""]
+            )
+            node.setFlags(node.flags() | QtCore.Qt.ItemIsEditable)
+            node.setExpanded(True)
+            for item in group.get("items") or []:
+                self._report_make_reading(
+                    node,
+                    item.get("label") or "",
+                    item.get("expr") or "",
+                    item.get("kind") or "raw",
+                    item.get("units") or "",
+                )
+
+    def _report_snapshot_values(self) -> list:
+        """The tree back as the `report_snapshot_groups` list. Rows with no
+        expression are dropped -- a half-typed row would only ever read blank."""
+        groups = []
+        for i in range(self._report_snapshots.topLevelItemCount()):
+            node = self._report_snapshots.topLevelItem(i)
+            items = []
+            for j in range(node.childCount()):
+                child = node.child(j)
+                expr = child.text(1).strip()
+                if not expr:
+                    continue
+                kind = child.text(2).strip().lower()
+                items.append({
+                    "label": child.text(0).strip() or expr,
+                    "expr": expr,
+                    "kind": kind if kind in self._REPORT_KINDS else "raw",
+                    "units": child.text(3).strip(),
+                })
+            if items:
+                groups.append({"name": node.text(0).strip() or "Readings", "items": items})
+        return groups
+
     def _build_autopilot_card(self) -> QtWidgets.QWidget:
         card = S.make_card("AutoPILOT (optional AI chat panel)")
         self._autopilot_enabled = QtWidgets.QCheckBox(
@@ -1277,6 +1471,9 @@ class ConfigDialog(QtWidgets.QDialog):
         self._font_family.setCurrentIndex(font_idx if font_idx >= 0 else 0)
         self._ui_scale.setValue(float(cfg["ui_scale"]))
         self._autopilot_enabled.setChecked(bool(cfg.get("autopilot_enabled", False)))
+        self._report_enabled.setChecked(bool(cfg.get("report_enabled", True)))
+        self._report_title.setText(cfg.get("report_title", "") or "")
+        self._report_load_snapshots(cfg.get("report_snapshot_groups") or [])
 
         self._device_paths_widget.clear()
         self._device_paths_widget.addItems(cfg.get("device_search_paths") or [])
@@ -1332,6 +1529,9 @@ class ConfigDialog(QtWidgets.QDialog):
             "font_family": self._font_family.currentData(),
             "ui_scale": self._ui_scale.value(),
             "autopilot_enabled": self._autopilot_enabled.isChecked(),
+            "report_enabled": self._report_enabled.isChecked(),
+            "report_title": self._report_title.text().strip(),
+            "report_snapshot_groups": self._report_snapshot_values(),
             "device_search_paths": [
                 self._device_paths_widget.item(i).text()
                 for i in range(self._device_paths_widget.count())

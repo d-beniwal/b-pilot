@@ -23,6 +23,7 @@ from .mode_buttons import ModeButtonBar
 from .panel_ribbon import CollapsibleDockPanel
 from .panel_ribbon import PanelRibbon
 from .plan_runner import PlanRunnerPanel
+from .report_panel import ReportDockWidget
 from .run_controls import RunControlBar
 from .session_log import SessionLogView
 from .switchto_popup import SwitchToButton
@@ -103,6 +104,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.runner = PlanRunnerPanel(ribbon=self.ribbon)
         self.console = ConsolePanel()
         self.session_log = SessionLogView()
+        self.report = ReportDockWidget(self)
+        self.report.set_console(self.console)
         self.run_controls = RunControlBar(self.console)
         self.mode_buttons = ModeButtonBar(self.console)
         self.queue = queue_panel.create_queue_panel(self.console)
@@ -179,6 +182,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ribbon.register_tab(
                 "autopilot", "AutoPILOT", self._show_autopilot_diagnostics
             )
+
+        # The experiment report, docked on the same edge as AutoPILOT.
+        # `setDockNestingEnabled(True)` above means Qt tabs or splits the two
+        # against each other on its own -- no explicit tabifyDockWidget needed.
+        # Left/right only, for the same reason the chat dock is: a document is
+        # unreadable as a thin horizontal strip.
+        self.report.setAllowedAreas(
+            QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea
+        )
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.report)
+        self.report.setVisible(bool(config.get("report_enabled")))
+        self.report.visibilityChanged.connect(self._on_report_visibility_changed)
+        self._report_collapsible = CollapsibleDockPanel(
+            self.report, self.ribbon, "report", "Report"
+        )
 
         self._build_menu()
         self.statusBar().showMessage(
@@ -328,6 +346,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._midas_bridge_checkbox.blockSignals(True)
         self._midas_bridge_checkbox.setChecked(bool(config.get("midas_bridge_enabled")))
         self._midas_bridge_checkbox.blockSignals(False)
+        # The report is filed per beamline, so a profile switch re-points it;
+        # its title and visibility are per-profile settings too.
+        self.report.setVisible(bool(config.get("report_enabled")))
+        self._act_report.blockSignals(True)
+        self._act_report.setChecked(bool(config.get("report_enabled")))
+        self._act_report.blockSignals(False)
+        self.report.load(config.get("beamline"), self.console.experiment)
         self._set_toolbar_status(notify)
         QtCore.QTimer.singleShot(0, self._refresh_attach_availability)
 
@@ -458,7 +483,11 @@ class MainWindow(QtWidgets.QMainWindow):
         `notes` is already baked into `command` by `plan_runner` as
         ``md={'notes': ...}`` on the generated ``RE(plan(...))`` call, so it
         lands in the run's start document (``cat[uid].metadata["start"]``).
-        It is still passed through here for status-line/logging purposes.
+        It is *also* recorded in the experiment report here -- the start
+        document is only readable once the catalog has ingested the run,
+        whereas the report is the thing the user is reading right now. The
+        full command goes with it so `report_builder.attach_notes` can file
+        the note under the run it belongs to rather than by bare timestamp.
         """
         detectors = self._sender_area_detectors()
         startup = det_startup_state.build_startup_commands(
@@ -473,6 +502,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # The panel's command text carries its `from ... import ...` line for
         # display; whether that line is actually sent is per-profile -- see
         # command_builder.for_console / config's `send_import_line`.
+        self.report.add_note(notes, command)
         command = command_builder.for_console(command)
         self.console.run_code_sequence([startup, command] if startup else [command])
         # Only trigger the MIDAS_GUI live-view bridge for dispatches that
@@ -526,6 +556,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.queue.add(item)
         else:
             self.queue.add(command, notes, area_detectors=area_detectors)
+        # Recorded now, but filed under the run once it actually dispatches:
+        # report_builder recovers the note from the command's own md={'notes'}
+        # and de-duplicates this copy away. This copy only earns its keep for a
+        # HAND-EDITED command, where plan_runner drops md= entirely and the
+        # note would otherwise be lost (see report_builder.attach_notes).
+        self.report.add_note(notes, command)
 
     # ── Menu ──────────────────────────────────────────────────────────────────
 
@@ -557,6 +593,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 "installed) next to this B-PILOT checkout."
             )
         self._act_autopilot.toggled.connect(self._on_autopilot_toggled)
+        self._act_report = pym.addAction("Experiment Report")
+        self._act_report.setCheckable(True)
+        self._act_report.setChecked(bool(config.get("report_enabled")))
+        self._act_report.setToolTip(
+            "Show the live lab record for the running experiment."
+        )
+        self._act_report.toggled.connect(self._on_report_toggled)
 
         m = self.menuBar().addMenu("&Console")
         self._act_attach = m.addAction("Attach to running kernel…")
@@ -631,6 +674,19 @@ class MainWindow(QtWidgets.QMainWindow):
         the dock's visibility (ribbon tab, title-bar close, menu, config)."""
         config.update({"autopilot_enabled": visible})
         act = getattr(self, "_act_autopilot", None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(visible)
+            act.blockSignals(False)
+
+    def _on_report_toggled(self, checked: bool) -> None:
+        self.report.setVisible(checked)
+
+    def _on_report_visibility_changed(self, visible: bool) -> None:
+        """Keep config + the menu checkbox in sync however the dock was hidden
+        (ribbon tab, title-bar close, menu) -- mirrors the AutoPILOT pair above."""
+        config.update({"report_enabled": visible})
+        act = getattr(self, "_act_report", None)
         if act is not None:
             act.blockSignals(True)
             act.setChecked(visible)
@@ -756,6 +812,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # including activity from before this GUI and live output while the
         # kernel is busy.
         self.session_log.load(config.get("beamline"), self.console.experiment)
+        self.report.load(config.get("beamline"), self.console.experiment)
         if attached:
             # Jump to the transcript so a reattached (possibly busy) kernel shows
             # activity immediately, instead of the blank interactive prompt.
@@ -773,6 +830,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._contacq_btn.set_console_ready(True)
         self.run_controls.set_console_ready(True)
         self.mode_buttons.set_console_ready(True)
+        self.report.set_console_ready(True)
         where = self._workdir.text().strip()
         if attached:
             self._set_toolbar_status(
@@ -918,7 +976,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._contacq_btn.set_console_ready(False)
         self.run_controls.set_console_ready(False)
         self.mode_buttons.set_console_ready(False)
+        self.report.set_console_ready(False)
         self.session_log.stop()   # kernel gone — stop polling (keep text visible)
+        self.report.stop()        # same: the report file on disk is untouched
         self._clear_experiment_banner()
         QtCore.QTimer.singleShot(0, self._refresh_attach_availability)
 

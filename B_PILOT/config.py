@@ -139,6 +139,41 @@ DEFAULTS: dict = {
     # from Configuration -> Appearance. Has no effect if AutoPILOT/ isn't
     # present or its deps aren't installed (autopilot_bridge.AVAILABLE).
     "autopilot_enabled": False,
+    # Experiment Report dock (see B_PILOT/report_panel.py) -- the per-experiment
+    # lab record that builds itself from the plans that run plus the notes and
+    # beamline snapshots the user adds. On by default: it only ever reads
+    # history that is already being written, and writes into that experiment's
+    # own folder. Toggled from Python -> Experiment Report, or Configuration ->
+    # Reports; visibility is persisted here the same way autopilot_enabled is.
+    "report_enabled": True,
+    # Optional human title for the report's first heading (e.g. "HEDM -- Ni625
+    # sample B"). Blank falls back to the experiment name.
+    "report_title": "",
+    # Readings offered by the report's Snapshot button, as
+    # [{"name": <group>, "items": [{"label", "expr", "kind", "units", "fmt"}]}].
+    # `expr` is evaluated IN THE USER'S OWN KERNEL via ConsolePanel.query_values
+    # -- B-PILOT never opens an EPICS channel itself. `kind` (float/int/str/
+    # bool/raw) wraps the expression so its repr survives the ast.literal_eval
+    # the reply is decoded with; without it, anything that isn't already a
+    # Python literal comes back as None. See snapshot_dialog.py.
+    #
+    # The shipped default is deliberately INSTRUMENT-AGNOSTIC -- RE exists in
+    # every profile (MPE and BITS alike) whereas device names do not, and a
+    # fabricated device name reads as an empty value rather than an error.
+    # Real device readings are added per site from Configuration -> Reports,
+    # whose "Add from device catalog" button offers only names that actually
+    # exist in that profile. Living in DEFAULTS rather than in each profile's
+    # default_config.json is what makes it reach a workstation that already
+    # has an active_config.json (see DECISIONS 2026-09-03 (5th)).
+    "report_snapshot_groups": [
+        {
+            "name": "RunEngine",
+            "items": [
+                {"label": "RE state", "expr": "RE.state", "kind": "str", "units": ""},
+                {"label": "scan_id", "expr": "RE.md.get('scan_id')", "kind": "raw", "units": ""},
+            ],
+        }
+    ],
     # Auto-start MIDAS_GUI's live view when a Run/Queue dispatch involves an
     # area_detector device (see B_PILOT/midas_bridge.py). On by default -- a
     # no-op if MIDAS_GUI isn't running; never auto-launches it. Toggled from
