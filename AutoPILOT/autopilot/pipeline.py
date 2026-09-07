@@ -42,6 +42,7 @@ _LOOKUP_TOOL_NAMES = {
     tools.LIST_DIRECTORY_TOOL_NAME,
     tools.SEARCH_CODEBASE_TOOL_NAME,
     tools.READ_SOURCE_FILE_TOOL_NAME,
+    tools.READ_EXPERIMENT_REPORT_TOOL_NAME,
 }
 
 
@@ -194,6 +195,19 @@ def _build_system_prompt(catalog) -> str:
     )
     lines.append("")
     lines.append(
+        "This session keeps a running lab record -- the experiment report -- "
+        "of every plan that reached the kernel, its outcome, the user's notes, "
+        "and any beamline snapshots they captured. Call read_experiment_report "
+        "for any question about what has happened in this beamtime ('what did "
+        "we run this morning?', 'why did the last scan fail?', 'summarise "
+        "today'). It is more current than the data catalog, which may not have "
+        "ingested recent runs yet. You cannot write to the report: if the user "
+        "asks you to add something, draft it in your reply and tell them to "
+        "press 'Add to report' -- a person reviews everything that enters the "
+        "record. Never claim you have added anything to the report."
+    )
+    lines.append("")
+    lines.append(
         "Never tell the user a plan or form has been generated, drafted, "
         "built, or is ready to open unless you actually called the matching "
         "propose_<template>_plan tool in this same turn and it succeeded -- "
@@ -263,6 +277,7 @@ def converse(
         tools.build_list_directory_schema(),
         tools.build_search_codebase_schema(),
         tools.build_read_source_file_schema(),
+        tools.build_read_experiment_report_schema(),
     ]
 
     system = _build_system_prompt(catalog)
@@ -339,6 +354,10 @@ def converse(
                             tool_use.input.get("query", ""),
                             tool_use.input.get("path_prefix"),
                             tool_use.input.get("limit"),
+                        )
+                    elif tool_use.name == tools.READ_EXPERIMENT_REPORT_TOOL_NAME:
+                        result_data = tools.read_experiment_report(
+                            tool_use.input.get("experiment")
                         )
                     else:
                         result_data = tools.read_source_file(

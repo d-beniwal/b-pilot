@@ -34,6 +34,7 @@ from .settings_dialog import AutoPilotSettingsDialog
 ensure_bpilot_on_path()
 
 from B_PILOT import config as bpilot_config  # noqa: E402
+from B_PILOT import report_store as bpilot_report_store  # noqa: E402
 from B_PILOT import style as bpilot_style  # noqa: E402
 
 
@@ -230,6 +231,14 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         # on a new send/New Chat so "Open in form" can never act on a stale
         # proposal from an earlier turn.
         self._pending: pipeline.PlanResult | None = None
+        # The last reply's text, for "Add to report". Separate from _pending:
+        # that one only holds a *plan proposal*, whereas anything the agent
+        # says -- a summary, an explanation -- can be worth keeping in the
+        # lab record.
+        self._last_reply: str = ""
+        # The request that produced it, used as the report block's subtitle so
+        # a reader can see what the agent was answering.
+        self._last_user_request: str = ""
         # "Thinking" placeholder state -- see _start_thinking()/_stop_thinking().
         self._thinking_timer: QtCore.QTimer | None = None
         self._thinking_pos: int | None = None
@@ -265,6 +274,18 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         self._open_form_btn.setEnabled(False)
         self._open_form_btn.clicked.connect(self._on_open_in_form)
         header_row.addWidget(self._open_form_btn)
+        # AutoPILOT has no tool that writes to the experiment report -- this
+        # button is the only path in, so a person has always read the text
+        # before it enters the lab record.
+        self._add_report_btn = QtWidgets.QPushButton("Add to report")
+        self._add_report_btn.setObjectName("AddToReportButton")
+        self._add_report_btn.setToolTip(
+            "Insert the latest reply into the experiment report, labelled as "
+            "AutoPILOT-written."
+        )
+        self._add_report_btn.setEnabled(False)
+        self._add_report_btn.clicked.connect(self._on_add_to_report)
+        header_row.addWidget(self._add_report_btn)
         new_chat_btn = QtWidgets.QPushButton("New Chat")
         new_chat_btn.setToolTip("Clear the transcript and start a fresh conversation (no memory of prior turns).")
         new_chat_btn.clicked.connect(self._new_chat)
@@ -372,6 +393,9 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         self._transcript.clear()
         self._pending = None
         self._open_form_btn.setEnabled(False)
+        self._last_reply = ""
+        self._last_user_request = ""
+        self._add_report_btn.setEnabled(False)
 
     def _on_toggle_floating(self) -> None:
         self.setFloating(not self.isFloating())
@@ -585,6 +609,9 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         # A new turn in flight supersedes whatever the last turn proposed.
         self._pending = None
         self._open_form_btn.setEnabled(False)
+        self._last_reply = ""
+        self._last_user_request = text
+        self._add_report_btn.setEnabled(False)
         self._start_thinking()
         self._worker.submit(text)
 
@@ -596,6 +623,51 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         self._input.setFocus()
         self._pending = result if (result.ok and result.gui_command) else None
         self._open_form_btn.setEnabled(self._pending is not None)
+        self._last_reply = (result.message or "").strip()
+        self._add_report_btn.setEnabled(bool(self._last_reply))
+
+    def _on_add_to_report(self) -> None:
+        """Insert the latest reply into the experiment report, human-gated.
+
+        Mirrors :meth:`_on_open_in_form`: act on what is pending, then log the
+        outcome so the interaction history records that a person accepted it.
+        The experiment is resolved from the history store rather than from a
+        live console handle -- ``autopilot_bridge`` injects only the plan-runner
+        panel, and this is not a good enough reason to widen that contract.
+        """
+        if not self._last_reply:
+            return
+        beamline = bpilot_config.as_dict().get("beamline") or ""
+        experiment = bpilot_report_store.current_experiment(beamline)
+        if not experiment:
+            self._append_note(
+                "No experiment is running yet, so there is no report to add to. "
+                "Launch or attach to a kernel first."
+            )
+            return
+        if bpilot_report_store.append_event(
+            beamline,
+            experiment,
+            bpilot_report_store.AGENT,
+            text=self._last_reply,
+            title=f"In reply to: {self._last_user_request}" if self._last_user_request else "",
+        ) is None:
+            self._append_note("Could not write to the report file.")
+            return
+        interaction_history.record_outcome(
+            beamline,
+            conversation_id=self._worker.conversation_id,
+            turn_id=self._pending.turn_id if self._pending else "",
+            action="added_to_report",
+        )
+        # Cleared, not just greyed out: the guard at the top of this method is
+        # then what makes a second insert impossible, rather than the button's
+        # enabled state alone.
+        self._last_reply = ""
+        self._add_report_btn.setEnabled(False)
+        self._append_note(
+            f"Added to the '{experiment}' report, labelled as AutoPILOT-written."
+        )
 
     def _on_open_in_form(self) -> None:
         if self._pending is None or not self._pending.template_key:

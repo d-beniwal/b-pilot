@@ -65,6 +65,18 @@ def markdown_path(beamline: str, experiment: str) -> str:
     return os.path.join(eh.experiment_dir(beamline, experiment), MARKDOWN_FILENAME)
 
 
+def current_experiment(beamline: str) -> str:
+    """The experiment a report defaults to: the most recently active one.
+
+    Used by callers that have no handle on the live console -- AutoPILOT, whose
+    only injected B-PILOT object is the plan-runner panel. Resolving it from the
+    history store keeps that narrow contract intact instead of widening the
+    bridge just to read a name.
+    """
+    known = eh.list_experiments(beamline)
+    return (known[0].get("name") or "") if known else ""
+
+
 def append_event(
     beamline: str,
     experiment: str,

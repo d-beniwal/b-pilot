@@ -27,6 +27,7 @@ from ._bpilot_path import ensure_bpilot_on_path
 
 ensure_bpilot_on_path()
 
+from B_PILOT import config as bpilot_config  # noqa: E402
 from B_PILOT import paths as bpilot_paths  # noqa: E402
 from B_PILOT import plan_parser as bpilot_plan_parser  # noqa: E402
 
@@ -43,6 +44,7 @@ READ_RUN_DATA_TOOL_NAME = "read_run_data"
 LIST_DIRECTORY_TOOL_NAME = "list_directory"
 SEARCH_CODEBASE_TOOL_NAME = "search_codebase"
 READ_SOURCE_FILE_TOOL_NAME = "read_source_file"
+READ_EXPERIMENT_REPORT_TOOL_NAME = "read_experiment_report"
 
 
 def build_list_devices_schema() -> dict:
@@ -757,4 +759,98 @@ def read_source_file(path: str, start_line: int | None, end_line: int | None) ->
         "total_lines": total_lines,
         "truncated": truncated,
         "text": text,
+    }
+
+
+# ── Experiment report ────────────────────────────────────────────────────────
+# B-PILOT's per-experiment lab record (see B_PILOT/report_store.py). Read-only,
+# deliberately: AutoPILOT has NO tool that writes to the report. Anything it
+# contributes goes through the chat dock's "Add to report" button, so a person
+# has seen the text before it enters the record. A lab notebook the agent could
+# append to unattended is not a record anyone should trust.
+
+# A long beamtime's report can run to many pages; the model only ever needs the
+# recent end of it, and an unbounded read would blow the context window.
+_REPORT_MAX_CHARS = 20000
+
+
+def build_read_experiment_report_schema() -> dict:
+    return {
+        "name": READ_EXPERIMENT_REPORT_TOOL_NAME,
+        "description": (
+            "Read the current experiment report -- B-PILOT's running lab record "
+            "of this beamtime: every plan that ran with its outcome, the notes "
+            "the user attached, and any beamline snapshots they captured. Use "
+            "this to answer questions about what has happened in THIS session "
+            "('what did we run this morning?', 'did the last grid scan work?', "
+            "'summarise today'). It reflects what actually reached the kernel, "
+            "so prefer it over search_runs for recent activity that the data "
+            "catalog may not have ingested yet. Returns Markdown."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "experiment": {
+                    "type": "string",
+                    "description": (
+                        "Experiment name. Omit for the session's current "
+                        "experiment, which is almost always what is wanted."
+                    ),
+                }
+            },
+            "required": [],
+        },
+    }
+
+
+def list_experiment_reports() -> dict:
+    """Experiments on this beamline that have a report, most recent first."""
+    from B_PILOT import experiment_history as bpilot_history
+
+    beamline = bpilot_config.as_dict().get("beamline") or ""
+    return {
+        "beamline": beamline,
+        "experiments": [e.get("name") for e in bpilot_history.list_experiments(beamline)],
+    }
+
+
+def read_experiment_report(experiment: str | None = None) -> dict:
+    """The report Markdown for `experiment` (default: the current one).
+
+    Falls back to building it on the fly when ``report.md`` has not been
+    written yet -- the file only appears once the report panel has rendered
+    once, and a chat question should not depend on whether the user happened
+    to have that dock open.
+    """
+    from B_PILOT import experiment_history as bpilot_history
+    from B_PILOT import report_builder as bpilot_report_builder
+    from B_PILOT import report_store as bpilot_report_store
+
+    cfg = bpilot_config.as_dict()
+    beamline = cfg.get("beamline") or ""
+    if not experiment:
+        experiment = bpilot_report_store.current_experiment(beamline)
+        if not experiment:
+            return {"error": "No experiment history exists for this beamline yet."}
+
+    markdown = bpilot_report_store.read_markdown(beamline, experiment)
+    if not markdown.strip():
+        markdown = bpilot_report_builder.render_markdown(
+            bpilot_history.read_entries(beamline, experiment),
+            bpilot_report_store.read_events(beamline, experiment),
+            experiment=experiment,
+            beamline=beamline,
+            title=cfg.get("report_title") or "",
+        )
+
+    truncated = len(markdown) > _REPORT_MAX_CHARS
+    if truncated:
+        # Keep the END: a question about "this session" is about recent work.
+        markdown = "...(earlier entries omitted)...\n" + markdown[-_REPORT_MAX_CHARS:]
+    return {
+        "beamline": beamline,
+        "experiment": experiment,
+        "truncated": truncated,
+        # Same credential-URL scrubbing every other tool output gets.
+        "report_markdown": redact(markdown),
     }
