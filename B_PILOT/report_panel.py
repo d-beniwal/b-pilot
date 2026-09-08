@@ -123,10 +123,11 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         # Hidden until asked for: most of the time the report is something to
         # read, and the arranging tools would only crowd it.
         self._arrange = ro.ArrangeList()
-        self._arrange.setVisible(False)
         self._arrange.moved.connect(self._on_arrange_moved)
         self._arrange.visibility_changed.connect(self._on_arrange_visibility)
-        layout.addWidget(self._arrange)
+        self._arrange_box = self._build_arrange_box()
+        self._arrange_box.setVisible(False)
+        layout.addWidget(self._arrange_box)
 
         buttons = QtWidgets.QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
@@ -211,6 +212,37 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         shortcut.activated.connect(self._on_paste_image)
         return btn
+
+    def _build_arrange_box(self) -> QtWidgets.QWidget:
+        """The Arrange list plus its own actions, shown and hidden as one.
+
+        Keeping them in a single container is what makes the toggle a one-liner
+        and guarantees the buttons can never be left on screen without the list
+        they act on.
+        """
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(S.px(4))
+        lay.addWidget(self._arrange)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        hint = QtWidgets.QLabel("Drag to reorder · untick to hide")
+        hint.setStyleSheet(f"color:{S.MUTED}; font-size:{S.px(11)}px;")
+        row.addWidget(hint)
+        row.addStretch(1)
+        row.addWidget(
+            self._button(
+                "↻ Reset order",
+                "Put every entry back in the order it was actually captured.\n"
+                "Clears manual placements only — nothing is deleted, and "
+                "hidden entries stay hidden.",
+                self._on_reset_order,
+            )
+        )
+        lay.addLayout(row)
+        return box
 
     def _build_title_bar(self) -> QtWidgets.QWidget:
         """Slim custom title bar with a float/dock toggle, as the chat dock does.
@@ -445,8 +477,40 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 )
             )
 
+    def _on_reset_order(self) -> None:
+        """Put every entry back where its timestamp says it belongs.
+
+        Confirmed first: a long beamtime's arrangement can be a lot of work to
+        redo, and unlike hiding there is no single click that brings one
+        placement back. The count is in the prompt so the answer is informed.
+        """
+        if not self._require_experiment():
+            return
+        edits = report_builder.plan_reset(self._entries)
+        if not edits:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Already in time order",
+                "Nothing has been moved — every entry is already where its "
+                "timestamp puts it.",
+            )
+            return
+        moved = len(edits)
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Reset order",
+            f"Put {moved} manually placed "
+            f"{'entry' if moved == 1 else 'entries'} back in the order "
+            "they were captured?\n\nNothing is deleted, and hidden entries "
+            "stay hidden — only the manual placements are cleared.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+        self._write_edits(edits)
+
     def _on_arrange_toggled(self, shown: bool) -> None:
-        self._arrange.setVisible(shown)
+        self._arrange_box.setVisible(shown)
         if shown:
             # Force a fill: the signature is unchanged from when the list was
             # last populated, but the rows were thrown away by `clear`.

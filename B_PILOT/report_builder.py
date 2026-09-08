@@ -258,6 +258,27 @@ def plan_move(entries: list[dict], moved_id: str, after_id: str) -> list[dict]:
     return renumber(items) + [{"target": moved_id, "pos": float(idx + 1) + 0.5}]
 
 
+def plan_reset(entries: list[dict]) -> list[dict]:
+    """Edits that drop every position override, back to timestamp order.
+
+    Clearing a position is itself an append -- ``{"pos": None}`` -- rather than
+    a deletion of the edit that set it. Same reason as everything else in this
+    module: the file only ever grows, so a reset is recorded as the deliberate
+    act it was, and the edits it supersedes are still there to read.
+
+    Because ``sort_key`` falls back to ``ts`` for a ``pos`` that is not a
+    number, an explicit ``None`` and a never-set position sort identically.
+
+    Only ordering is touched. Hidden entries stay hidden: "put this back in
+    time order" is not a statement about what belongs in the report.
+    """
+    return [
+        {"target": entry_id(e), "pos": None}
+        for e in ordered(entries)
+        if e.get("pos") is not None
+    ]
+
+
 def plan_step(entries: list[dict], moved_id: str, delta: int) -> list[dict]:
     """Edits that nudge `moved_id` one place up (``delta=-1``) or down (``+1``).
 
@@ -494,11 +515,20 @@ def _hidden_note(entry: dict) -> list[str]:
 
 
 def _stamp(entry: dict, day: str) -> str:
-    """Time of capture -- with its date, if the entry has been filed under a
-    heading for a different day. A relocated entry must still say when it
-    actually happened, or moving a figure would quietly relabel it."""
+    """Time of capture -- with its date whenever the section in effect is not
+    this entry's own day. A relocated entry must still say when it actually
+    happened, or moving a figure would quietly relabel it.
+
+    An empty `day` counts as "differs", which is the case of an entry dragged
+    above the report's first day heading: there is no section over it at all,
+    so a bare clock time there would read as belonging to the heading that
+    comes *after* it -- a different day.
+
+    An unmoved entry is always rendered right after its own day heading was
+    emitted, so it takes the short form.
+    """
     when = time.localtime(entry.get("ts") or 0.0)
-    if day and time.strftime("%Y-%m-%d", when) != day:
+    if time.strftime("%Y-%m-%d", when) != day:
         return time.strftime("%Y-%m-%d %H:%M:%S", when)
     return time.strftime("%H:%M:%S", when)
 
