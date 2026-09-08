@@ -241,12 +241,6 @@ class EntryDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
         self._text.setFocus()
 
-    def preselect(self, entry_id: str) -> None:
-        """Point the placement combo at `entry_id`, if it is offered."""
-        index = self._place.findData(entry_id)
-        if index >= 0:
-            self._place.setCurrentIndex(index)
-
     def text(self) -> str:
         if isinstance(self._text, QtWidgets.QPlainTextEdit):
             return self._text.toPlainText().strip()

@@ -483,13 +483,18 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         return event
 
     def _ask_entry(self, title: str, prompt: str, *, multiline: bool = True):
-        """Run an :class:`report_organize.EntryDialog`; ``None`` if cancelled."""
+        """Run an :class:`report_organize.EntryDialog`; ``None`` if cancelled.
+
+        The placement always starts at "At the end (now)". Filing at the end is
+        overwhelmingly the common case, and it is the one choice that is never
+        wrong -- an entry can be dragged afterwards, whereas a dialog that
+        quietly pre-aimed somewhere else (at whatever happened to be selected
+        in the Arrange list, say) files things in the wrong place for anyone
+        who does not read the combo before pressing OK.
+        """
         dlg = ro.EntryDialog(
             title, prompt, self._entries, multiline=multiline, parent=self
         )
-        # A row selected in the Arrange list is a stated interest in that point
-        # in the report, so offer it as the destination.
-        dlg.preselect(self._arrange.selected_id())
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return None
         return dlg
