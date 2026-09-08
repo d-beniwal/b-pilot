@@ -71,22 +71,37 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         self._subject.setStyleSheet(f"color:{S.MUTED};")
         header.addWidget(self._subject)
         header.addStretch(1)
-        self._show_hidden = QtWidgets.QCheckBox("Show hidden")
-        self._show_hidden.setToolTip(
+        # View state and whole-report actions live together along the top, away
+        # from the buttons below that *add* to the record -- the two do
+        # different kinds of thing and mixing them made the bottom row long.
+        self._show_hidden = self._toggle(
+            "👁 Show hidden",
             "Bring hidden entries back into view, marked and with the reason "
             "they were suppressed.\nHiding never deletes anything — every entry "
             "stays in the report file on disk.\nExports always leave hidden "
-            "entries out."
+            "entries out.",
         )
         self._show_hidden.toggled.connect(self.refresh)
         header.addWidget(self._show_hidden)
-        self._follow = QtWidgets.QCheckBox("Follow")
-        self._follow.setChecked(True)
-        self._follow.setToolTip(
+        self._follow = self._toggle(
+            "📌 Follow",
             "Keep the newest entry in view as the report grows.\n"
-            "Uncheck to read back through earlier entries undisturbed."
+            "Switch off to read back through earlier entries undisturbed.",
+            checked=True,
         )
         header.addWidget(self._follow)
+        header.addWidget(
+            self._button(
+                "⟳ Rebuild",
+                "Re-read the kernel history and rebuild the report now.",
+                self.refresh,
+            )
+        )
+        header.addWidget(
+            self._button(
+                "⤓ Export", "Save a standalone copy of this report.", self._on_export
+            )
+        )
         layout.addLayout(header)
 
         self._view = QtWidgets.QTextBrowser()
@@ -129,18 +144,13 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             self._button("§ Heading", "Start a new titled section in the report.", self._on_heading)
         )
         buttons.addStretch(1)
-        self._arrange_btn = QtWidgets.QPushButton("⇅ Arrange")
-        self._arrange_btn.setCheckable(True)
-        self._arrange_btn.setToolTip(
+        self._arrange_btn = self._toggle(
+            "⇅ Arrange",
             "Show the entry list: drag entries to reorder the report, "
-            "untick one to hide it.\nCapture timestamps are never changed."
+            "untick one to hide it.\nCapture timestamps are never changed.",
         )
         self._arrange_btn.toggled.connect(self._on_arrange_toggled)
         buttons.addWidget(self._arrange_btn)
-        buttons.addWidget(
-            self._button("⟳ Rebuild", "Re-read the kernel history and rebuild the report now.", self.refresh)
-        )
-        buttons.addWidget(self._button("⤓ Export", "Save a standalone copy of this report.", self._on_export))
         layout.addLayout(buttons)
 
         self.setWidget(body)
@@ -156,6 +166,23 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         btn = QtWidgets.QPushButton(text)
         btn.setToolTip(tip)
         btn.clicked.connect(slot)
+        return btn
+
+    @staticmethod
+    def _toggle(text: str, tip: str, *, checked: bool = False) -> QtWidgets.QPushButton:
+        """A latching button that lights up green while it is on.
+
+        These are view *modes*, not settings on a form -- "am I following the
+        tail", "am I arranging" -- and at a beamline the panel is often read
+        from across a desk, where a lit button carries much further than a
+        checkbox tick. Styled per-widget rather than in the global QSS so a
+        checkable button elsewhere in the app does not silently change look.
+        """
+        btn = QtWidgets.QPushButton(text)
+        btn.setToolTip(tip)
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        btn.setStyleSheet(S.toggle_button_qss())
         return btn
 
     def _image_button(self) -> QtWidgets.QPushButton:

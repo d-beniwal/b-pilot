@@ -669,6 +669,38 @@ def status_button_qss(bg: str) -> str:
     )
 
 
+def toggle_button_qss(on_bg: str | None = None) -> str:
+    """QSS for a **checkable** ``QPushButton``: plain when off, filled when on.
+
+    A checkbox says "this is a setting"; a lit button says "this is a mode you
+    are currently in", which is what a view toggle actually is. Uses the same
+    fill/hover/pressed derivation as :func:`status_button_qss` so a lit toggle
+    and a lit status button read as the same kind of object.
+
+    `on_bg` defaults to the theme's success green. Read at call time, never at
+    import: ``apply_theme`` rebinds these globals, so a default captured in a
+    signature would freeze the light palette into a dark session.
+    """
+    bg = on_bg or SUCCESS
+    border = darken(bg, 130)
+    hover = lighten(bg, 112)
+    return (
+        # Unchecked deliberately restates the base look rather than inheriting
+        # it: a widget stylesheet replaces the application one for the
+        # selectors it names, so an unstyled `QPushButton` rule here would
+        # leave the off state unpainted.
+        f"QPushButton{{color:{TEXT};background:{BUTTON_BG};"
+        f"border:{px(1)}px solid {BORDER};border-radius:{px(6)}px;"
+        f"padding:{px(4)}px {px(10)}px;}}"
+        f"QPushButton:hover{{background:{BUTTON_HOVER_BG};border-color:{HOVER};}}"
+        f"QPushButton:checked{{color:white;font-weight:bold;"
+        f"background:{bg};border-color:{border};}}"
+        f"QPushButton:checked:hover{{background:{hover};border-color:{border};}}"
+        f"QPushButton:disabled{{color:{DISABLED_TEXT};background:{BUTTON_DISABLED_BG};"
+        f"border-color:{BUTTON_DISABLED_BORDER};}}"
+    )
+
+
 class _GripHandle(QtWidgets.QSplitterHandle):
     """Splitter handle that paints a small 3-dot grip so it reads as
     draggable instead of blending into the adjacent card border."""
