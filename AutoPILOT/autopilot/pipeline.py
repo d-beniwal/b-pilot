@@ -43,6 +43,8 @@ _LOOKUP_TOOL_NAMES = {
     tools.SEARCH_CODEBASE_TOOL_NAME,
     tools.READ_SOURCE_FILE_TOOL_NAME,
     tools.READ_EXPERIMENT_REPORT_TOOL_NAME,
+    tools.LIST_REPORT_ENTRIES_TOOL_NAME,
+    tools.ANALYZE_EXPERIMENT_REPORT_TOOL_NAME,
 }
 
 
@@ -70,6 +72,12 @@ class PlanResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    # Set by the propose_report_block terminal tool: a Markdown block the agent
+    # drafted for the experiment report, as
+    # {"title", "markdown", "place_after", "replaces"}. Nothing has been
+    # written -- the chat dock's "Add to report" button is what commits it, and
+    # `replaces` there hides the superseded entry rather than destroying it.
+    report_block: dict | None = None
     # Set only when this result was persisted via `interaction_history.record_turn`
     # (see `converse()`'s `record` param) -- lets a caller log a later human
     # action (e.g. "opened in form") back against this exact turn.
@@ -197,14 +205,30 @@ def _build_system_prompt(catalog) -> str:
     lines.append(
         "This session keeps a running lab record -- the experiment report -- "
         "of every plan that reached the kernel, its outcome, the user's notes, "
-        "and any beamline snapshots they captured. Call read_experiment_report "
-        "for any question about what has happened in this beamtime ('what did "
-        "we run this morning?', 'why did the last scan fail?', 'summarise "
-        "today'). It is more current than the data catalog, which may not have "
-        "ingested recent runs yet. You cannot write to the report: if the user "
-        "asks you to add something, draft it in your reply and tell them to "
-        "press 'Add to report' -- a person reviews everything that enters the "
-        "record. Never claim you have added anything to the report."
+        "and any beamline snapshots and figures they captured. You have four "
+        "tools for it. read_experiment_report gives you its content; "
+        "analyze_experiment_report computes counts, durations and failures "
+        "(use it rather than tallying runs yourself out of the prose); "
+        "list_report_entries gives you a stable id for each block, which is "
+        "how you refer to one. It is more current than the data catalog, "
+        "which may not have ingested recent runs yet."
+    )
+    lines.append("")
+    lines.append(
+        "The fourth is propose_report_block, and it is how you help write the "
+        "record. Call it whenever the user asks you to write, draft, add, "
+        "summarise, tidy or improve something in the report -- pass "
+        "place_after to file it beside a particular entry, or replaces to "
+        "offer a rewrite of one (accepting a rewrite hides the original rather "
+        "than deleting it, so nothing is lost). Read the report first so what "
+        "you write fits what is already there, and do not restate a run's "
+        "command, status or duration: those are recorded automatically and "
+        "repeating them makes the record harder to read, not more complete.\n"
+        "You still cannot WRITE to the report, and this tool does not write "
+        "either -- it hands the user a draft, which they add by pressing 'Add "
+        "to report'. A person reviews everything that enters the record. Say "
+        "you have drafted something and they can add it; never say you have "
+        "added it."
     )
     lines.append("")
     lines.append(
@@ -278,6 +302,9 @@ def converse(
         tools.build_search_codebase_schema(),
         tools.build_read_source_file_schema(),
         tools.build_read_experiment_report_schema(),
+        tools.build_list_report_entries_schema(),
+        tools.build_analyze_experiment_report_schema(),
+        tools.build_propose_report_block_schema(),
     ]
 
     system = _build_system_prompt(catalog)
@@ -357,6 +384,16 @@ def converse(
                         )
                     elif tool_use.name == tools.READ_EXPERIMENT_REPORT_TOOL_NAME:
                         result_data = tools.read_experiment_report(
+                            tool_use.input.get("experiment"),
+                            bool(tool_use.input.get("include_hidden")),
+                        )
+                    elif tool_use.name == tools.LIST_REPORT_ENTRIES_TOOL_NAME:
+                        result_data = tools.list_report_entries(
+                            tool_use.input.get("experiment"),
+                            bool(tool_use.input.get("include_hidden")),
+                        )
+                    elif tool_use.name == tools.ANALYZE_EXPERIMENT_REPORT_TOOL_NAME:
+                        result_data = tools.analyze_experiment_report(
                             tool_use.input.get("experiment")
                         )
                     else:
@@ -410,6 +447,50 @@ def converse(
             reason = raw_spec.get("reason") or "The request didn't look like a scan/count description."
             return (
                 PlanResult(ok=False, message=reason, raw_spec=raw_spec, model=client.model, tool_name=called_tool, tool_calls=tool_calls),
+                messages,
+            )
+
+        if called_tool == tools.PROPOSE_REPORT_BLOCK_TOOL_NAME:
+            # A draft, not a write. Nothing has touched report.jsonl; the chat
+            # dock renders this with an "Add to report" button and a person
+            # decides. `ok=True` because the turn succeeded at what it was for
+            # -- producing something for review.
+            markdown = (raw_spec.get("markdown") or "").strip()
+            if not markdown:
+                return (
+                    PlanResult(
+                        ok=False,
+                        message="The model proposed an empty report block.",
+                        model=client.model,
+                        tool_name=called_tool,
+                        tool_calls=tool_calls,
+                    ),
+                    messages,
+                )
+            title = (raw_spec.get("title") or "").strip()
+            block = {
+                "title": title,
+                "markdown": markdown,
+                "place_after": (raw_spec.get("place_after") or "").strip(),
+                "replaces": (raw_spec.get("replaces") or "").strip(),
+            }
+            verb = "rewrite of an existing entry" if block["replaces"] else "block"
+            return (
+                PlanResult(
+                    ok=True,
+                    message=(
+                        f'Drafted a {verb} for the report'
+                        + (f' — "{title}".' if title else ".")
+                        + '\n\nNothing has been added yet: review it and press '
+                        '"Add to report" if you want it in the record.'
+                        + "\n\n" + markdown
+                    ),
+                    raw_spec=raw_spec,
+                    report_block=block,
+                    model=client.model,
+                    tool_name=called_tool,
+                    tool_calls=tool_calls,
+                ),
                 messages,
             )
 

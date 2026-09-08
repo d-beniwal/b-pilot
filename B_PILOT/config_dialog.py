@@ -1208,6 +1208,38 @@ class ConfigDialog(QtWidgets.QDialog):
         title_row.addWidget(self._report_title, 1)
         card.body.addLayout(title_row)
 
+        excluded = QtWidgets.QLabel(
+            "<b>Plans kept out of the report.</b> Names or <tt>fnmatch</tt> "
+            "patterns (<tt>cont_acq*</tt>). Excluded runs are <i>still "
+            "recorded</i> — they show under the report's “Show hidden” toggle "
+            "and come back if you remove the pattern. Typically continuous "
+            "acquisition, which is a tool for aligning rather than a "
+            "measurement worth filing."
+        )
+        excluded.setWordWrap(True)
+        excluded.setStyleSheet(f"color: {S.MUTED};")
+        card.body.addWidget(excluded)
+
+        self._report_excluded = QtWidgets.QListWidget()
+        self._report_excluded.setMaximumHeight(S.px(90))
+        self._report_excluded.setToolTip(
+            "Plan names excluded from the rendered report. Double-click to edit."
+        )
+        card.body.addWidget(self._report_excluded)
+
+        excl_row = QtWidgets.QHBoxLayout()
+        for text, tip, slot in (
+            ("+ Add plan…", "Pick a plan from this profile's plan files, or type a name.",
+             self._report_add_excluded),
+            ("Remove", "Stop excluding the selected plan.", self._report_remove_excluded),
+        ):
+            btn = QtWidgets.QPushButton(text)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            excl_row.addWidget(btn)
+        excl_row.addStretch(1)
+        card.body.addLayout(excl_row)
+
         note = QtWidgets.QLabel(
             "Snapshot readings. Each is evaluated <b>in the running kernel</b> "
             "when you press Snapshot — B-PILOT never opens an EPICS channel "
@@ -1249,6 +1281,64 @@ class ConfigDialog(QtWidgets.QDialog):
         row.addStretch(1)
         card.body.addLayout(row)
         return card
+
+    # -- excluded-plan list helpers -----------------------------------------
+
+    def _report_discovered_plans(self) -> list[str]:
+        """Plan names found in this profile's plan files, for the picker.
+
+        Same principle as "Add from devices…" below: offer only names that
+        really exist, so an exclusion cannot silently do nothing because of a
+        typo. Falls back to free text when discovery turns up nothing (a plans
+        directory that is not reachable from this machine, for instance).
+        """
+        plans_dir = self._plans_dir.text().strip()
+        if not plans_dir:
+            return []
+        names: set[str] = set()
+        for _display, kind, abs_path, _depth in P.scan_user_dir(plans_dir):
+            if kind == "dir":
+                continue
+            names.update(P.find_plan_specs(abs_path))
+        return sorted(names)
+
+    def _report_excluded_names(self) -> list[str]:
+        return [
+            self._report_excluded.item(i).text().strip()
+            for i in range(self._report_excluded.count())
+            if self._report_excluded.item(i).text().strip()
+        ]
+
+    def _report_add_excluded(self) -> None:
+        choices = self._report_discovered_plans()
+        if choices:
+            picked, ok = QtWidgets.QInputDialog.getItem(
+                self, "Exclude a plan from the report", "Plan:", choices, 0, True
+            )
+        else:
+            picked, ok = QtWidgets.QInputDialog.getText(
+                self,
+                "Exclude a plan from the report",
+                "Plan name or pattern (e.g. cont_acq):",
+            )
+        picked = (picked or "").strip()
+        if not (ok and picked) or picked in self._report_excluded_names():
+            return
+        item = QtWidgets.QListWidgetItem(picked)
+        item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
+        self._report_excluded.addItem(item)
+
+    def _report_remove_excluded(self) -> None:
+        row = self._report_excluded.currentRow()
+        if row >= 0:
+            self._report_excluded.takeItem(row)
+
+    def _report_load_excluded(self, names: list) -> None:
+        self._report_excluded.clear()
+        for name in names or []:
+            item = QtWidgets.QListWidgetItem(str(name))
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
+            self._report_excluded.addItem(item)
 
     # -- snapshot table helpers ---------------------------------------------
 
@@ -1474,6 +1564,7 @@ class ConfigDialog(QtWidgets.QDialog):
         self._report_enabled.setChecked(bool(cfg.get("report_enabled", True)))
         self._report_title.setText(cfg.get("report_title", "") or "")
         self._report_load_snapshots(cfg.get("report_snapshot_groups") or [])
+        self._report_load_excluded(cfg.get("report_excluded_plans") or [])
 
         self._device_paths_widget.clear()
         self._device_paths_widget.addItems(cfg.get("device_search_paths") or [])
@@ -1531,6 +1622,7 @@ class ConfigDialog(QtWidgets.QDialog):
             "autopilot_enabled": self._autopilot_enabled.isChecked(),
             "report_enabled": self._report_enabled.isChecked(),
             "report_title": self._report_title.text().strip(),
+            "report_excluded_plans": self._report_excluded_names(),
             "report_snapshot_groups": self._report_snapshot_values(),
             "device_search_paths": [
                 self._device_paths_widget.item(i).text()

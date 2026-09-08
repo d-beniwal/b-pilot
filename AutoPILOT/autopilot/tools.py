@@ -16,6 +16,7 @@ import fnmatch
 import itertools
 import os
 import re
+import time
 from pathlib import Path
 
 from . import data_catalog
@@ -45,6 +46,12 @@ LIST_DIRECTORY_TOOL_NAME = "list_directory"
 SEARCH_CODEBASE_TOOL_NAME = "search_codebase"
 READ_SOURCE_FILE_TOOL_NAME = "read_source_file"
 READ_EXPERIMENT_REPORT_TOOL_NAME = "read_experiment_report"
+LIST_REPORT_ENTRIES_TOOL_NAME = "list_report_entries"
+ANALYZE_EXPERIMENT_REPORT_TOOL_NAME = "analyze_experiment_report"
+#: Terminal, not a lookup: it ends the turn with something for a person to
+#: accept or discard (see `pipeline._run_turns` and the chat dock's
+#: "Add to report" button). It writes nothing itself.
+PROPOSE_REPORT_BLOCK_TOOL_NAME = "propose_report_block"
 
 
 def build_list_devices_schema() -> dict:
@@ -763,15 +770,50 @@ def read_source_file(path: str, start_line: int | None, end_line: int | None) ->
 
 
 # ── Experiment report ────────────────────────────────────────────────────────
-# B-PILOT's per-experiment lab record (see B_PILOT/report_store.py). Read-only,
-# deliberately: AutoPILOT has NO tool that writes to the report. Anything it
-# contributes goes through the chat dock's "Add to report" button, so a person
-# has seen the text before it enters the record. A lab notebook the agent could
-# append to unattended is not a record anyone should trust.
+# B-PILOT's per-experiment lab record (see B_PILOT/report_store.py). The agent
+# can read it, analyse it, and *draft* additions to it -- but it has NO tool
+# that writes. `propose_report_block` ends the turn holding a draft out for
+# review; the text only enters the record when a person presses "Add to
+# report" in the chat dock. A lab notebook an agent could append to unattended
+# is not a record anyone should trust, and that constraint is unchanged by
+# giving it more to say.
+#
+# `replaces` is how "improve this section" works without breaking that: the
+# proposal names the block it supersedes, and accepting it *hides* the original
+# rather than overwriting it. The superseded text is still in report.jsonl and
+# still reachable from the panel's "Show hidden" toggle.
 
 # A long beamtime's report can run to many pages; the model only ever needs the
 # recent end of it, and an unbounded read would blow the context window.
 _REPORT_MAX_CHARS = 20000
+
+
+def _report_entries(experiment: str | None) -> tuple[str, str, list]:
+    """``(beamline, experiment, resolved entries)`` for a report read.
+
+    One resolver for all three report tools, so they can never disagree about
+    which experiment "the current one" is or which runs the profile excludes.
+
+    Always ``persist=False``: answering a question in chat must not mutate the
+    lab record. Runs not yet reconciled into ``report.jsonl`` are still folded
+    in for the read, so the answer is current either way.
+    """
+    from B_PILOT import report_builder as bpilot_report_builder
+    from B_PILOT import report_store as bpilot_report_store
+
+    cfg = bpilot_config.as_dict()
+    beamline = cfg.get("beamline") or ""
+    if not experiment:
+        experiment = bpilot_report_store.current_experiment(beamline)
+    if not experiment:
+        return beamline, "", []
+    entries = bpilot_report_builder.collect(
+        beamline,
+        experiment,
+        persist=False,
+        exclude=cfg.get("report_excluded_plans") or [],
+    )
+    return beamline, experiment, entries
 
 
 def build_read_experiment_report_schema() -> dict:
@@ -796,9 +838,124 @@ def build_read_experiment_report_schema() -> dict:
                         "Experiment name. Omit for the session's current "
                         "experiment, which is almost always what is wanted."
                     ),
-                }
+                },
+                "include_hidden": {
+                    "type": "boolean",
+                    "description": (
+                        "Also return entries the user has hidden, and runs the "
+                        "profile excludes from the report (continuous "
+                        "acquisition and similar). Default false, which is what "
+                        "the report itself shows. Set it only when the user "
+                        "asks about something they cannot see, or about the "
+                        "excluded plans specifically."
+                    ),
+                },
             },
             "required": [],
+        },
+    }
+
+
+def build_list_report_entries_schema() -> dict:
+    return {
+        "name": LIST_REPORT_ENTRIES_TOOL_NAME,
+        "description": (
+            "List the experiment report's entries as structured rows -- id, "
+            "kind (run/note/snapshot/image/heading/agent), time, title and a "
+            "short summary. Use this when you need to refer to a specific "
+            "block: to say where a new one should go (place_after), or which "
+            "one you are rewriting (replaces) in propose_report_block. For "
+            "reading the report's actual content, use read_experiment_report "
+            "instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "experiment": {"type": "string", "description": "Omit for the current one."},
+                "include_hidden": {
+                    "type": "boolean",
+                    "description": "Include hidden and excluded entries. Default false.",
+                },
+            },
+            "required": [],
+        },
+    }
+
+
+def build_analyze_experiment_report_schema() -> dict:
+    return {
+        "name": ANALYZE_EXPERIMENT_REPORT_TOOL_NAME,
+        "description": (
+            "Compute statistics over the experiment report: how many plans "
+            "ran, how many failed and with what error, per-plan tallies, total "
+            "and typical run durations, how many notes/snapshots/figures were "
+            "recorded, and when the beamtime started and last saw activity. "
+            "Prefer this over counting entries yourself from "
+            "read_experiment_report -- these numbers are computed from the "
+            "record, and a summary that miscounts runs is worse than none."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "experiment": {"type": "string", "description": "Omit for the current one."}
+            },
+            "required": [],
+        },
+    }
+
+
+def build_propose_report_block_schema() -> dict:
+    return {
+        "name": PROPOSE_REPORT_BLOCK_TOOL_NAME,
+        "description": (
+            "Offer a block of Markdown for the user to add to the experiment "
+            "report -- a summary of the session, a written-up observation, a "
+            "tidied version of a rough note, an analysis of what failed. Call "
+            "this whenever the user asks you to write, draft, add, summarise "
+            "or improve something in the report.\n\n"
+            "This does NOT write to the report. It hands the draft to the user, "
+            "who reviews it and presses 'Add to report'. Say that you have "
+            "drafted it and they can add it -- never that you added it.\n\n"
+            "Read the report first so the block fits what is already there, "
+            "and do not restate a run's command or status: those are already "
+            "recorded automatically."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short heading for the block, e.g. 'Morning alignment summary'.",
+                },
+                "markdown": {
+                    "type": "string",
+                    "description": (
+                        "The block itself. Markdown: paragraphs, **bold**, "
+                        "`code`, '- ' bullets, '> ' quotes and pipe tables all "
+                        "render. Keep it to what a reader of the lab record "
+                        "needs."
+                    ),
+                },
+                "place_after": {
+                    "type": "string",
+                    "description": (
+                        "Entry id (from list_report_entries) this block should "
+                        "follow. Omit to put it at the end, which is usually "
+                        "right for a summary."
+                    ),
+                },
+                "replaces": {
+                    "type": "string",
+                    "description": (
+                        "Entry id this block supersedes -- use when the user "
+                        "asks you to rewrite or improve an existing entry. "
+                        "Accepting hides the original rather than deleting it, "
+                        "so nothing is lost. Only ever name an entry you got "
+                        "from list_report_entries."
+                    ),
+                },
+            },
+            "required": ["markdown"],
         },
     }
 
@@ -814,30 +971,27 @@ def list_experiment_reports() -> dict:
     }
 
 
-def read_experiment_report(experiment: str | None = None) -> dict:
+def read_experiment_report(
+    experiment: str | None = None, include_hidden: bool = False
+) -> dict:
     """The report Markdown for `experiment` (default: the current one).
 
     Rendered on demand: ``report.jsonl`` is a machine store, and no Markdown
-    is kept on disk. Read-only -- see the ``persist=False`` note below.
+    is kept on disk. Read-only -- see :func:`_report_entries`.
     """
     from B_PILOT import report_builder as bpilot_report_builder
-    from B_PILOT import report_store as bpilot_report_store
 
     cfg = bpilot_config.as_dict()
-    beamline = cfg.get("beamline") or ""
+    beamline, experiment, entries = _report_entries(experiment)
     if not experiment:
-        experiment = bpilot_report_store.current_experiment(beamline)
-        if not experiment:
-            return {"error": "No experiment history exists for this beamline yet."}
+        return {"error": "No experiment history exists for this beamline yet."}
 
-    # persist=False: answering a question in chat must never write to the
-    # record. Any run not yet reconciled into report.jsonl is still folded in
-    # for this read, so the answer is current either way.
     markdown = bpilot_report_builder.render_markdown(
-        bpilot_report_builder.collect(beamline, experiment, persist=False),
+        entries,
         experiment=experiment,
         beamline=beamline,
         title=cfg.get("report_title") or "",
+        show_hidden=bool(include_hidden),
     )
 
     truncated = len(markdown) > _REPORT_MAX_CHARS
@@ -850,4 +1004,125 @@ def read_experiment_report(experiment: str | None = None) -> dict:
         "truncated": truncated,
         # Same credential-URL scrubbing every other tool output gets.
         "report_markdown": redact(markdown),
+    }
+
+
+#: Longest per-entry summary in a `list_report_entries` row. Enough to tell two
+#: notes apart; the full text is what `read_experiment_report` is for.
+_ENTRY_SUMMARY_CHARS = 120
+
+#: Cap on rows returned, newest last. A long beamtime can hold thousands.
+_ENTRY_LIST_MAX = 300
+
+
+def list_report_entries(
+    experiment: str | None = None, include_hidden: bool = False
+) -> dict:
+    """The report's entries as structured rows, in reading order.
+
+    Exists so the model can *name* a block -- `place_after` and `replaces` on
+    `propose_report_block` both take an id from here. Reading the rendered
+    Markdown would give it text but no stable handle on any part of it.
+    """
+    from B_PILOT import report_builder as bpilot_report_builder
+    from B_PILOT import report_organize as bpilot_report_organize
+
+    beamline, experiment, entries = _report_entries(experiment)
+    if not experiment:
+        return {"error": "No experiment history exists for this beamline yet."}
+
+    visible = bpilot_report_builder.visible_entries(
+        entries, show_hidden=bool(include_hidden)
+    )
+    rows = []
+    for entry in visible[-_ENTRY_LIST_MAX:]:
+        summary = bpilot_report_organize.entry_label(entry)
+        rows.append(
+            {
+                "id": entry.get("id") or bpilot_report_builder.entry_id(entry),
+                "kind": entry.get("kind"),
+                "when": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(entry.get("ts") or 0.0)
+                ),
+                "summary": redact(summary[:_ENTRY_SUMMARY_CHARS]),
+                "hidden": bool(entry.get("hidden")),
+            }
+        )
+    return {
+        "beamline": beamline,
+        "experiment": experiment,
+        "total": len(visible),
+        "truncated": len(visible) > _ENTRY_LIST_MAX,
+        "entries": rows,
+    }
+
+
+def analyze_experiment_report(experiment: str | None = None) -> dict:
+    """Counts, durations and failures over one experiment's report.
+
+    Computed rather than left to the model to tally out of prose: a summary
+    that gets the number of runs wrong is worse than no summary, and counting
+    is the one thing that is both easy here and unreliable there.
+
+    Durations come from ``end_ts - ts``, which is "until the run last printed"
+    (see :func:`report_builder.fold_runs`) -- approximate, and labelled as such
+    in the field name so the model does not present it as exact.
+    """
+    from B_PILOT import report_builder as bpilot_report_builder
+
+    beamline, experiment, entries = _report_entries(experiment)
+    if not experiment:
+        return {"error": "No experiment history exists for this beamline yet."}
+
+    runs = [e for e in entries if e.get("kind") == "run"]
+    shown = [r for r in runs if not r.get("hidden")]
+    failed = [r for r in shown if not r.get("ok", True)]
+
+    durations = sorted(
+        (r["end_ts"] - r["ts"])
+        for r in shown
+        if r.get("end_ts") and r.get("ts") and r["end_ts"] >= r["ts"]
+    )
+    by_plan: dict[str, int] = {}
+    for run in shown:
+        name = run.get("plan_name") or "?"
+        by_plan[name] = by_plan.get(name, 0) + 1
+
+    stamps = [e.get("ts") or 0.0 for e in entries if e.get("ts")]
+    kinds: dict[str, int] = {}
+    for entry in entries:
+        if entry.get("hidden"):
+            continue
+        kinds[entry.get("kind") or "?"] = kinds.get(entry.get("kind") or "?", 0) + 1
+
+    return {
+        "beamline": beamline,
+        "experiment": experiment,
+        "runs_total": len(shown),
+        "runs_ok": len(shown) - len(failed),
+        "runs_failed": len(failed),
+        # Hidden here means either the user hid it or the profile excludes the
+        # plan; either way it is in the record but not in the document.
+        "runs_hidden": len(runs) - len(shown),
+        "runs_by_plan": dict(sorted(by_plan.items(), key=lambda kv: -kv[1])),
+        "failures": [
+            {
+                "plan_name": r.get("plan_name"),
+                "when": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("ts") or 0.0)),
+                "error": redact(r.get("error") or ""),
+            }
+            for r in failed
+        ],
+        "approx_total_run_seconds": round(sum(durations)) if durations else 0,
+        "approx_median_run_seconds": (
+            round(durations[len(durations) // 2]) if durations else 0
+        ),
+        "approx_longest_run_seconds": round(durations[-1]) if durations else 0,
+        "entry_counts": kinds,
+        "first_activity": (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(min(stamps))) if stamps else ""
+        ),
+        "last_activity": (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(max(stamps))) if stamps else ""
+        ),
     }

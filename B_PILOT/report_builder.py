@@ -22,10 +22,19 @@ entry that starts it -- it has to be inferred from what follows, which is what
 :func:`fold_runs` does. And because that outcome arrives late, a run record
 has to be revisable in an append-only file: a later entry with the same ``ts``
 supersedes an earlier one, and :func:`collect` collapses them.
+
+**Reading order is not storage order.** An entry sorts by its ``pos`` if it has
+one and by its ``ts`` otherwise, so a figure captured now can be filed beside
+the scan it illustrates from two hours ago without its timestamp being touched
+-- the record still says when the pixels were captured, the notebook says where
+they belong. ``pos`` and ``hidden`` are never written onto the entry itself;
+they arrive as :data:`report_store.EDIT` overlays that :func:`apply_edits`
+folds on at read time (see :func:`plan_move` for how a new ``pos`` is chosen).
 """
 from __future__ import annotations
 
 import ast
+import fnmatch
 import re
 import time
 
@@ -47,6 +56,227 @@ _OUTPUT_KINDS = {"stream", "result", "display", "error"}
 # note is typed when the item is enqueued but the run may not reach the kernel
 # for another hour, far outside any timestamp-matching window.
 _RE_MD = re.compile(r",\s*md\s*=\s*(\{.*\})\s*\)\s*$")
+
+
+#: Shown against a run suppressed by ``report_excluded_plans`` rather than by
+#: an explicit click, so a reader looking at the hidden entries can tell the
+#: two apart.
+EXCLUDED_REASON = "excluded by configuration"
+
+
+def entry_id(event: dict) -> str:
+    """Stable identity for one entry, for an :data:`report_store.EDIT` to name.
+
+    Entries written before ids existed have none, so the fallback is derived
+    from what they do have. It has to be *deterministic* -- an id that changed
+    between two reads would silently orphan every edit made against it -- which
+    rules out anything generated at read time.
+    """
+    stored = event.get("id")
+    if stored:
+        return str(stored)
+    return f"{event.get('kind') or 'x'}-{float(event.get('ts') or 0.0):.6f}"
+
+
+def run_id(ts: float) -> str:
+    """Identity for the run starting at `ts`.
+
+    :func:`collect` writes a run **twice** -- once when first seen, once when
+    it closes -- and both writes must land on one identity or an edit made
+    against the first would be orphaned by the second. Deriving it from the
+    timestamp, which is also what keys the supersession, guarantees that, and
+    matches what :func:`entry_id` computes for a run written by an older build.
+    """
+    return f"{rs.RUN}-{float(ts):.6f}"
+
+
+def sort_key(event: dict) -> float:
+    """Where this entry reads, which is its ``pos`` if it has been placed and
+    its capture time otherwise. ``bool`` is excluded explicitly -- it is an
+    ``int`` subclass in Python and would otherwise sort a stray flag as 0/1."""
+    pos = event.get("pos")
+    if isinstance(pos, (int, float)) and not isinstance(pos, bool):
+        return float(pos)
+    return float(event.get("ts") or 0.0)
+
+
+def ordered(entries: list[dict]) -> list[dict]:
+    """`entries` in reading order.
+
+    Runs come first at an identical key so a snapshot taken the instant a plan
+    starts still reads as belonging to it -- the same tie-break the renderer
+    has always used, kept in one place now that two callers need it.
+    """
+    return sorted(
+        entries, key=lambda e: (sort_key(e), 0 if e.get("kind") == rs.RUN else 1)
+    )
+
+
+def is_excluded(plan_name: str | None, patterns) -> bool:
+    """Whether `plan_name` matches one of the configured exclusion patterns.
+
+    ``fnmatch`` rather than equality so ``cont_acq*`` covers a family, while a
+    bare name still matches itself exactly. Case-sensitive: plan names are
+    Python identifiers, and a case-insensitive match would be a lie.
+    """
+    if not plan_name or not patterns:
+        return False
+    return any(
+        fnmatch.fnmatchcase(plan_name, pattern.strip())
+        for pattern in patterns
+        if isinstance(pattern, str) and pattern.strip()
+    )
+
+
+def apply_edits(events: list[dict], *, exclude=()) -> list[dict]:
+    """Fold :data:`report_store.EDIT` overlays onto their targets.
+
+    Returns the non-edit entries, each with its ``id`` filled in and any
+    ``pos``/``hidden`` override applied. Edits are newest-wins per *field*, so
+    hiding a block and later moving it keeps both.
+
+    Exclusion by plan name is applied as a **default** rather than an override:
+    an explicit edit wins, so a run the config would suppress stays visible if
+    the user has deliberately unhidden it. An edit naming an entry that is not
+    in `events` is simply ignored -- the report may have been read at a moment
+    that entry was not yet reconciled in.
+    """
+    overrides: dict[str, dict] = {}
+    for event in events:
+        if event.get("kind") != rs.EDIT:
+            continue
+        target = event.get("target")
+        if not target:
+            continue
+        overrides.setdefault(str(target), {}).update(
+            {k: v for k, v in event.items() if k in ("pos", "hidden")}
+        )
+
+    resolved: list[dict] = []
+    for event in events:
+        if event.get("kind") == rs.EDIT:
+            continue
+        entry = dict(event)
+        identity = entry_id(entry)
+        entry["id"] = identity
+        override = overrides.get(identity) or {}
+
+        if entry.get("kind") == rs.RUN and is_excluded(entry.get("plan_name"), exclude):
+            entry["hidden"] = True
+            entry["hidden_reason"] = EXCLUDED_REASON
+        if "hidden" in override:
+            entry["hidden"] = bool(override["hidden"])
+            if not entry["hidden"]:
+                entry.pop("hidden_reason", None)
+        if "pos" in override:
+            entry["pos"] = override["pos"]
+        resolved.append(entry)
+    return resolved
+
+
+# ── Placement ────────────────────────────────────────────────────────────────
+# Positions are floats and a new one is the midpoint of its neighbours, which
+# is ample in practice: consecutive entries are normally seconds apart in `ts`,
+# so there are billions of representable slots between any two. The guard below
+# exists for the pathological case of repeatedly inserting into one shrinking
+# gap, which would eventually exhaust double precision and start silently
+# tying entries together.
+
+#: Below this, a gap is treated as having no room left and the whole report is
+#: renumbered instead. Chosen well above double-precision resolution near a
+#: Unix timestamp (~1e-7 at 1.7e9) so the check fires before ties can occur.
+MIN_GAP = 1e-6
+
+
+def _mid(before: float, after: float) -> float | None:
+    """Midpoint of two positions, or ``None`` if the gap has closed."""
+    if after - before < MIN_GAP:
+        return None
+    return before + (after - before) / 2.0
+
+
+def renumber(items: list[dict]) -> list[dict]:
+    """Edits assigning `items` (in reading order) the positions ``1..N``.
+
+    The escape hatch when a gap runs out. Renumbering to small integers is
+    deliberate: a later entry defaults to ``pos = ts`` (~1.7e9), so it still
+    sorts after everything renumbered here, which is where a new entry belongs.
+    """
+    return [{"target": entry_id(item), "pos": float(i + 1)} for i, item in enumerate(items)]
+
+
+def _index_of(items: list[dict], identity: str) -> int | None:
+    for i, item in enumerate(items):
+        if entry_id(item) == identity:
+            return i
+    return None
+
+
+def plan_insert(entries: list[dict], after_id: str) -> tuple[float | None, list[dict]]:
+    """``(pos for a new entry, edits to apply first)``.
+
+    A ``None`` position means "leave it unset" -- the entry then sorts by its
+    own timestamp, which is already the end of the report. That is the answer
+    both for "at the end" and for "after the last entry", so the common case
+    writes no override at all and the report stays exactly as it was.
+    """
+    if not after_id:
+        return None, []
+    items = ordered(entries)
+    idx = _index_of(items, after_id)
+    if idx is None or idx == len(items) - 1:
+        return None, []
+    position = _mid(sort_key(items[idx]), sort_key(items[idx + 1]))
+    if position is not None:
+        return position, []
+    return float(idx + 1) + 0.5, renumber(items)
+
+
+def plan_move(entries: list[dict], moved_id: str, after_id: str) -> list[dict]:
+    """Edits that place `moved_id` directly after `after_id` (``""`` = the top).
+
+    The moved entry is taken out of the list before its destination is measured,
+    so "after the entry that currently follows me" means what a reader expects
+    rather than landing back where it started.
+    """
+    items = [e for e in ordered(entries) if entry_id(e) != moved_id]
+    if not items:
+        return []
+
+    if not after_id:
+        return [{"target": moved_id, "pos": sort_key(items[0]) - 1.0}]
+
+    idx = _index_of(items, after_id)
+    if idx is None:
+        return []
+    before = sort_key(items[idx])
+    if idx == len(items) - 1:
+        return [{"target": moved_id, "pos": before + 1.0}]
+    position = _mid(before, sort_key(items[idx + 1]))
+    if position is not None:
+        return [{"target": moved_id, "pos": position}]
+    return renumber(items) + [{"target": moved_id, "pos": float(idx + 1) + 0.5}]
+
+
+def plan_step(entries: list[dict], moved_id: str, delta: int) -> list[dict]:
+    """Edits that nudge `moved_id` one place up (``delta=-1``) or down (``+1``).
+
+    What the report's own inline ``[↑]``/``[↓]`` controls call. Expressed in
+    terms of :func:`plan_move` so there is one implementation of the awkward
+    part; a nudge off either end is a no-op rather than an error.
+    """
+    items = ordered(entries)
+    idx = _index_of(items, moved_id)
+    if idx is None:
+        return []
+    if delta < 0:
+        if idx == 0:
+            return []
+        # Above my predecessor == after whatever precedes *it* (or the top).
+        return plan_move(entries, moved_id, entry_id(items[idx - 2]) if idx >= 2 else "")
+    if idx >= len(items) - 1:
+        return []
+    return plan_move(entries, moved_id, entry_id(items[idx + 1]))
 
 
 def _split_notes(command: str) -> tuple[str, list[str]]:
@@ -133,11 +363,11 @@ def fold_runs(entries: list[dict]) -> list[dict]:
     deliberately not a run: it would bury the plans in noise. It is still in
     the Session log tab, which is where that belongs.
     """
-    ordered = sorted(entries, key=lambda e: e.get("ts") or 0.0)
+    by_time = sorted(entries, key=lambda e: e.get("ts") or 0.0)
     runs: list[dict] = []
     current: dict | None = None
 
-    for entry in ordered:
+    for entry in by_time:
         kind = entry.get("kind")
         ts = entry.get("ts") or 0.0
 
@@ -227,10 +457,61 @@ def attach_notes(runs: list[dict], events: list[dict]) -> list[dict]:
     return leftover
 
 
-def _run_markdown(run: dict) -> str:
+#: URL scheme the report's own inline controls use. `report_panel._on_anchor`
+#: is the only thing that interprets it, and `QTextBrowser.setOpenLinks(False)`
+#: means nothing tries to navigate to it.
+CONTROL_SCHEME = "bpilot"
+
+
+def _controls_md(entry: dict, controls: bool) -> str:
+    """The trailing ``[hide] [↑] [↓]`` links for one block, or nothing.
+
+    Emitted only for the live panel. An exported document must never carry
+    them: they are UI, they would render as dead links in anyone else's
+    Markdown viewer, and a PDF of a lab record should read as a document.
+    """
+    if not controls:
+        return ""
+    identity = entry.get("id") or entry_id(entry)
+    verb = "show" if entry.get("hidden") else "hide"
+    return (
+        f"  [{verb}]({CONTROL_SCHEME}:{verb}/{identity})"
+        f" [↑]({CONTROL_SCHEME}:up/{identity})"
+        f" [↓]({CONTROL_SCHEME}:down/{identity})"
+    )
+
+
+def _hidden_prefix(entry: dict) -> str:
+    return "🚫 " if entry.get("hidden") else ""
+
+
+def _hidden_note(entry: dict) -> list[str]:
+    """The line explaining *why* a block is hidden, when it is being shown."""
+    if not entry.get("hidden"):
+        return []
+    reason = entry.get("hidden_reason") or "hidden from the report"
+    return [f"_{reason}_", ""]
+
+
+def _stamp(entry: dict, day: str) -> str:
+    """Time of capture -- with its date, if the entry has been filed under a
+    heading for a different day. A relocated entry must still say when it
+    actually happened, or moving a figure would quietly relabel it."""
+    when = time.localtime(entry.get("ts") or 0.0)
+    if day and time.strftime("%Y-%m-%d", when) != day:
+        return time.strftime("%Y-%m-%d %H:%M:%S", when)
+    return time.strftime("%H:%M:%S", when)
+
+
+def _run_markdown(run: dict, *, controls: bool = False, day: str = "") -> str:
     """One run as a Markdown section."""
-    stamp = time.strftime("%H:%M:%S", time.localtime(run["ts"]))
-    out = [f"### {stamp} — {run['plan_name']}", "", "```python", run["command"], "```", ""]
+    stamp = _stamp(run, day)
+    out = [
+        f"### {_hidden_prefix(run)}{stamp} — {run['plan_name']}{_controls_md(run, controls)}",
+        "",
+    ]
+    out += _hidden_note(run)
+    out += ["```python", run["command"], "```", ""]
 
     status = "✅ ok" if run["ok"] else "❌ failed"
     bits = [f"**Status:** {status}"]
@@ -249,21 +530,25 @@ def _run_markdown(run: dict) -> str:
     return "\n".join(out)
 
 
-def _event_markdown(event: dict) -> str:
+def _event_markdown(event: dict, *, controls: bool = False, day: str = "") -> str:
     """One manual event as a Markdown section."""
     kind = event.get("kind")
-    stamp = time.strftime("%H:%M:%S", time.localtime(event.get("ts") or 0.0))
+    stamp = _stamp(event, day)
     text = event.get("text") or ""
     title = event.get("title") or ""
+    mark = _hidden_prefix(event)
+    tools = _controls_md(event, controls)
 
     if kind == rs.HEADING:
         # "▸" marks this as the user's own section break, so it reads
         # distinctly from the automatic day headings at the same level.
-        return f"## ▸ {title or text}\n"
+        return f"## {mark}▸ {title or text}{tools}\n"
 
     if kind == rs.SNAPSHOT:
         head = title or "Beamline snapshot"
-        out = [f"#### 📸 {head} — {stamp}", "", "| Reading | Value | Units |", "|---|---|---|"]
+        out = [f"#### {mark}📸 {head} — {stamp}{tools}", ""]
+        out += _hidden_note(event)
+        out += ["| Reading | Value | Units |", "|---|---|---|"]
         for row in event.get("rows") or []:
             cells = list(row) + ["", "", ""]
             label, value, units = cells[0], cells[1], cells[2]
@@ -277,14 +562,16 @@ def _event_markdown(event: dict) -> str:
         # Markdown viewer once `report_images.package_markdown` has copied the
         # figures next to it. The pixels are a sidecar file; see report_images.
         head = title or "Figure"
-        return "\n".join(
-            [f"#### 🖼 {head} — {stamp}", "", f"![{head}]({event.get('file') or ''})", ""]
-        )
+        out = [f"#### {mark}🖼 {head} — {stamp}{tools}", ""]
+        out += _hidden_note(event)
+        out += [f"![{head}]({event.get('file') or ''})", ""]
+        return "\n".join(out)
 
     if kind == rs.AGENT:
         # Always labelled: a reader must be able to tell agent-written prose
         # from the instrument's own record at a glance.
-        out = [f"#### ✨ AutoPILOT — {stamp}", ""]
+        out = [f"#### {mark}✨ AutoPILOT — {stamp}{tools}", ""]
+        out += _hidden_note(event)
         if title:
             out.append(f"*{title}*")
             out.append("")
@@ -292,7 +579,8 @@ def _event_markdown(event: dict) -> str:
         out.append("")
         return "\n".join(out)
 
-    out = [f"#### ✎ Note — {stamp}", ""]
+    out = [f"#### {mark}✎ Note — {stamp}{tools}", ""]
+    out += _hidden_note(event)
     for line in text.splitlines() or [""]:
         out.append(f"> {line}")
     out.append("")
@@ -307,16 +595,24 @@ def _event_markdown(event: dict) -> str:
 _RUN_REWRITE_FIELDS = ("closed", "ok", "error")
 
 
-def collect(beamline: str, experiment: str, *, persist: bool = True) -> list[dict]:
+def collect(
+    beamline: str, experiment: str, *, persist: bool = True, exclude=()
+) -> list[dict]:
     """Everything the report contains, with new runs reconciled into the file.
 
     Folds :mod:`experiment_history`'s entries into runs and writes any that
     ``report.jsonl`` does not already hold. Returns the complete, de-duplicated
-    entry list to render.
+    entry list to render, with every ``pos``/``hidden`` overlay already applied
+    (see :func:`apply_edits`).
 
     Two entries per run at most: one when it is first seen, one when it closes
     and its outcome is final (see ``_RUN_REWRITE_FIELDS``). A later entry
     supersedes an earlier one with the same ``ts``.
+
+    `exclude` is the configured plan-name exclusion list. Excluded runs are
+    still reconciled and still written -- they come back marked ``hidden``, so
+    they stay in the record and reappear the moment the exclusion is lifted,
+    with nothing to rebuild.
 
     `persist=False` reads without writing anything -- the mode AutoPILOT's
     read-only report tool uses, so that answering a question in chat never
@@ -329,6 +625,7 @@ def collect(beamline: str, experiment: str, *, persist: bool = True) -> list[dic
 
     fresh: list[dict] = []
     for run in fold_runs(eh.read_entries(beamline, experiment)):
+        identity = run_id(run["ts"])
         old = persisted.get(run["ts"])
         if persist and (
             old is None
@@ -339,14 +636,15 @@ def collect(beamline: str, experiment: str, *, persist: bool = True) -> list[dic
                 experiment,
                 rs.RUN,
                 ts=run["ts"],
+                id=identity,
                 **{k: v for k, v in run.items() if k != "ts"},
             )
         # Always overlay the freshly folded version, persisted or not: it
         # carries the newest end_ts, so a run in progress shows a live
         # duration rather than whatever was true when it was first written.
-        fresh.append({"kind": rs.RUN, **run})
+        fresh.append({"kind": rs.RUN, "id": identity, **run})
 
-    return _collapse(stored, fresh)
+    return apply_edits(_collapse(stored, fresh), exclude=exclude)
 
 
 def _collapse(stored: list[dict], fresh: list[dict]) -> list[dict]:
@@ -361,32 +659,49 @@ def _collapse(stored: list[dict], fresh: list[dict]) -> list[dict]:
     return others + list(runs.values())
 
 
+def visible_entries(events: list[dict], *, show_hidden: bool = False) -> list[dict]:
+    """The entries a reader sees, in reading order.
+
+    Shared by the renderer and the Arrange list so the two can never disagree
+    about what the report currently contains or what order it is in.
+    """
+    return ordered(
+        [e for e in events if show_hidden or not e.get("hidden")]
+    )
+
+
 def render_markdown(
     events: list[dict],
     *,
     experiment: str,
     beamline: str,
     title: str = "",
+    show_hidden: bool = False,
+    controls: bool = False,
 ) -> str:
     """The whole report document, rendered from the master file's entries.
 
     `events` is what :func:`collect` returns -- runs and authored entries
-    together, in any order.
+    together, in any order, with their overlays already applied.
+
+    `show_hidden` brings hidden entries back, marked and with the reason they
+    were suppressed; every export path leaves it off, which is what hiding
+    means. `controls` adds the panel's inline ``[hide] [↑] [↓]`` links and is
+    likewise for the live view only.
     """
     runs = sorted(
         (e for e in events if e.get("kind") == rs.RUN), key=lambda r: r.get("ts") or 0.0
     )
     for run in runs:  # tolerate an entry written by an older build
         run.setdefault("notes", [])
+    # Notes are attached before anything is filtered, so hiding a run takes the
+    # note that belongs to it along rather than leaving it floating unmoored.
     loose = attach_notes(runs, [e for e in events if e.get("kind") != rs.RUN])
+    items = visible_entries(runs + loose, show_hidden=show_hidden)
 
-    items: list[tuple[float, str, dict]] = [(r["ts"], "run", r) for r in runs]
-    items += [(e.get("ts") or 0.0, "event", e) for e in loose]
-    # Stable sort with runs ahead of events at an identical timestamp, so a
-    # snapshot taken the instant a plan starts still reads as belonging to it.
-    items.sort(key=lambda it: (it[0], 0 if it[1] == "run" else 1))
-
-    started = items[0][0] if items else time.time()
+    # Earliest capture time, not the first entry in reading order: moving a
+    # block to the top must not relabel when the experiment started.
+    started = min((e.get("ts") or 0.0) for e in items) if items else time.time()
     out = [
         "<!-- Rendered by B-PILOT from the experiment's report.jsonl, which is",
         "     the live record. This copy is a point-in-time snapshot: it is not",
@@ -406,17 +721,32 @@ def render_markdown(
         return "\n".join(out)
 
     day = ""
-    for ts, kind, payload in items:
-        this_day = time.strftime("%Y-%m-%d", time.localtime(ts))
-        if this_day != day:
+    for entry in items:
+        when = entry.get("ts") or 0.0
+        this_day = time.strftime("%Y-%m-%d", time.localtime(when))
+        # An entry that has been deliberately filed somewhere does NOT open a
+        # day: one figure moved back two hours would otherwise make the day
+        # headings flap A -> B -> A. The chronological spine stays the entries
+        # nobody has moved, and a relocated one prints its own full date
+        # instead (see `_stamp`).
+        if this_day != day and entry.get("pos") is None:
             day = this_day
             out.append("---")
             out.append("")
-            out.append(f"## {time.strftime('%A, %d %B %Y', time.localtime(ts))}")
+            out.append(f"## {time.strftime('%A, %d %B %Y', time.localtime(when))}")
             out.append("")
-        out.append(_run_markdown(payload) if kind == "run" else _event_markdown(payload))
+        out.append(
+            _run_markdown(entry, controls=controls, day=day)
+            if entry.get("kind") == rs.RUN
+            else _event_markdown(entry, controls=controls, day=day)
+        )
 
+    shown = sum(1 for e in items if e.get("kind") == rs.RUN)
+    tally = f"_{shown} plan run(s) recorded._"
+    buried = len(runs) - shown
+    if buried > 0:
+        tally = f"_{shown} plan run(s) recorded; {buried} hidden._"
     out.append("")
-    out.append(f"_{len(runs)} plan run(s) recorded._")
+    out.append(tally)
     out.append("")
     return "\n".join(out)

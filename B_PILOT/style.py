@@ -17,6 +17,7 @@ constraint as :func:`set_scale`.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -350,6 +351,33 @@ def set_scale(factor: float) -> None:
 def px(n: int | float) -> int:
     """Scale a pixel literal by the current :data:`SCALE`."""
     return round(n * SCALE)
+
+
+@contextlib.contextmanager
+def temporary_theme(theme_key: str, *, scale: float | None = None):
+    """Render one thing under a different palette, then put everything back.
+
+    For output that leaves the screen. A PDF is printed onto white paper, but
+    every color in this app comes from the *session's* theme -- exporting from
+    a dark session would put near-white text on a white page. The report's
+    exporter wraps its render in ``temporary_theme("light", scale=1.0)``, which
+    also pins the UI-scale multiplier so a document's type size does not depend
+    on how large the operator likes their widgets.
+
+    Only safe around code that reads these globals and draws immediately, which
+    is exactly what :mod:`report_render` does. Never hold a widget across it --
+    widget stylesheets are resolved once at construction, so they would keep
+    whatever palette happened to be bound at the time.
+    """
+    previous_theme, previous_scale = CURRENT_THEME, SCALE
+    _rebind_globals(resolve(theme_key))
+    if scale is not None:
+        set_scale(scale)
+    try:
+        yield
+    finally:
+        _rebind_globals(previous_theme)
+        set_scale(previous_scale)
 
 
 def darken(hex_color: str, factor: int = 130) -> str:

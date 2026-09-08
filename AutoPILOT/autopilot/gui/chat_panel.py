@@ -34,6 +34,7 @@ from .settings_dialog import AutoPilotSettingsDialog
 ensure_bpilot_on_path()
 
 from B_PILOT import config as bpilot_config  # noqa: E402
+from B_PILOT import report_builder as bpilot_report_builder  # noqa: E402
 from B_PILOT import report_store as bpilot_report_store  # noqa: E402
 from B_PILOT import style as bpilot_style  # noqa: E402
 
@@ -236,6 +237,11 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         # says -- a summary, an explanation -- can be worth keeping in the
         # lab record.
         self._last_reply: str = ""
+        # A structured block from propose_report_block, when the last turn
+        # produced one: carries its own title, placement and (optionally) the
+        # entry it rewrites. `None` means "Add to report" falls back to
+        # inserting the raw reply, which is the original behaviour.
+        self._report_block: dict | None = None
         # The request that produced it, used as the report block's subtitle so
         # a reader can see what the agent was answering.
         self._last_user_request: str = ""
@@ -395,7 +401,8 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         self._open_form_btn.setEnabled(False)
         self._last_reply = ""
         self._last_user_request = ""
-        self._add_report_btn.setEnabled(False)
+        self._report_block = None
+        self._sync_report_button()
 
     def _on_toggle_floating(self) -> None:
         self.setFloating(not self.isFloating())
@@ -610,8 +617,9 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         self._pending = None
         self._open_form_btn.setEnabled(False)
         self._last_reply = ""
+        self._report_block = None
         self._last_user_request = text
-        self._add_report_btn.setEnabled(False)
+        self._sync_report_button()
         self._start_thinking()
         self._worker.submit(text)
 
@@ -624,18 +632,56 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         self._pending = result if (result.ok and result.gui_command) else None
         self._open_form_btn.setEnabled(self._pending is not None)
         self._last_reply = (result.message or "").strip()
-        self._add_report_btn.setEnabled(bool(self._last_reply))
+        self._report_block = result.report_block
+        self._sync_report_button()
+
+    def _sync_report_button(self) -> None:
+        """Label the button for whatever is actually pending.
+
+        A drafted block and "keep this reply" are different enough acts that
+        the button should say which one it is about to do -- otherwise a user
+        who asked for a rewrite has no way to tell whether the model produced
+        one or just talked about it, which is exactly the false-narration
+        failure the system prompt is guarding against.
+        """
+        block = self._report_block
+        self._add_report_btn.setEnabled(bool(block or self._last_reply))
+        if not block:
+            self._add_report_btn.setText("Add to report")
+            self._add_report_btn.setToolTip(
+                "Insert the latest reply into the experiment report, labelled "
+                "as AutoPILOT-written."
+            )
+            return
+        title = block.get("title") or "drafted block"
+        self._add_report_btn.setText("Add draft ✦")
+        self._add_report_btn.setToolTip(
+            f"Add “{title}” to the experiment report, labelled as "
+            "AutoPILOT-written."
+            + (
+                "\nThe entry it rewrites will be hidden, not deleted."
+                if block.get("replaces")
+                else ""
+            )
+        )
 
     def _on_add_to_report(self) -> None:
-        """Insert the latest reply into the experiment report, human-gated.
+        """Insert into the experiment report, human-gated. The only write path.
 
         Mirrors :meth:`_on_open_in_form`: act on what is pending, then log the
         outcome so the interaction history records that a person accepted it.
         The experiment is resolved from the history store rather than from a
         live console handle -- ``autopilot_bridge`` injects only the plan-runner
         panel, and this is not a good enough reason to widen that contract.
+
+        Two things can be pending. A **proposal** from ``propose_report_block``
+        carries its own title, a placement, and possibly an entry it rewrites;
+        otherwise the raw last reply is added, which is the original behaviour
+        and still the right answer for "that explanation was useful, keep it".
         """
-        if not self._last_reply:
+        block = self._report_block
+        text = (block or {}).get("markdown") or self._last_reply
+        if not text:
             return
         beamline = bpilot_config.as_dict().get("beamline") or ""
         experiment = bpilot_report_store.current_experiment(beamline)
@@ -645,15 +691,50 @@ class ChatDockWidget(QtWidgets.QDockWidget):
                 "Launch or attach to a kernel first."
             )
             return
+
+        title = (block or {}).get("title") or (
+            f"In reply to: {self._last_user_request}" if self._last_user_request else ""
+        )
+        fields = {}
+        entries = []
+        if block:
+            # Resolve the placement against the report as it stands right now,
+            # not as it was when the model read it -- runs may have landed since.
+            entries = bpilot_report_builder.collect(
+                beamline,
+                experiment,
+                persist=False,
+                exclude=bpilot_config.as_dict().get("report_excluded_plans") or [],
+            )
+            position, prerequisites = bpilot_report_builder.plan_insert(
+                entries, block.get("place_after") or ""
+            )
+            if prerequisites:
+                bpilot_report_store.append_edits(beamline, experiment, prerequisites)
+            if position is not None:
+                fields["pos"] = position
+
         if bpilot_report_store.append_event(
-            beamline,
-            experiment,
-            bpilot_report_store.AGENT,
-            text=self._last_reply,
-            title=f"In reply to: {self._last_user_request}" if self._last_user_request else "",
+            beamline, experiment, bpilot_report_store.AGENT, text=text, title=title, **fields
         ) is None:
             self._append_note("Could not write to the report file.")
             return
+
+        superseded = (block or {}).get("replaces")
+        if superseded:
+            # Hidden, never deleted: a rewrite the user later disagrees with
+            # must be recoverable, and the original is still in report.jsonl
+            # behind the panel's "Show hidden" toggle.
+            known = {bpilot_report_builder.entry_id(e) for e in entries}
+            if superseded in known:
+                bpilot_report_store.append_edits(
+                    beamline, experiment, [{"target": superseded, "hidden": True}]
+                )
+            else:
+                self._append_note(
+                    "Added, but the entry it was meant to replace no longer "
+                    "exists in the report, so nothing was hidden."
+                )
         interaction_history.record_outcome(
             beamline,
             conversation_id=self._worker.conversation_id,
@@ -664,9 +745,11 @@ class ChatDockWidget(QtWidgets.QDockWidget):
         # then what makes a second insert impossible, rather than the button's
         # enabled state alone.
         self._last_reply = ""
-        self._add_report_btn.setEnabled(False)
+        self._report_block = None
+        self._sync_report_button()
         self._append_note(
             f"Added to the '{experiment}' report, labelled as AutoPILOT-written."
+            + (" The entry it replaces is now hidden." if superseded else "")
         )
 
     def _on_open_in_form(self) -> None:

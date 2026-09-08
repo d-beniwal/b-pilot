@@ -149,6 +149,22 @@ DEFAULTS: dict = {
     # Optional human title for the report's first heading (e.g. "HEDM -- Ni625
     # sample B"). Blank falls back to the experiment name.
     "report_title": "",
+    # Plan names kept out of the rendered report (fnmatch patterns, so
+    # "cont_acq*" covers a family). Continuous acquisition is the motivating
+    # case: it is a temporary-analysis tool, run constantly while aligning, and
+    # it buries the actual measurements in a lab record.
+    #
+    # An excluded run is still reconciled and still WRITTEN to report.jsonl --
+    # it comes back marked hidden, reappears under the panel's "Show hidden"
+    # toggle labelled "excluded by configuration", and returns to the document
+    # the moment the pattern is removed. Nothing is ever dropped from the
+    # record on the strength of a config value.
+    #
+    # Here rather than in the four default_config.json files for the same
+    # reason as report_snapshot_groups below: a workstation that already has an
+    # active_config.json never sees a change to a tracked default
+    # (DECISIONS 2026-09-03 (5th)).
+    "report_excluded_plans": ["cont_acq"],
     # Readings offered by the report's Snapshot button, as
     # [{"name": <group>, "items": [{"label", "expr", "kind", "units", "fmt"}]}].
     # `expr` is evaluated IN THE USER'S OWN KERNEL via ConsolePanel.query_values

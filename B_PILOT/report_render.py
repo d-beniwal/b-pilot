@@ -31,6 +31,7 @@ from PyQt5 import QtGui
 
 from . import report_images as ri
 from . import style as S
+from .report_builder import CONTROL_SCHEME
 
 #: Widest a figure is drawn in the panel. Qt's rich-text engine has no
 #: ``max-width``, so a width *attribute* is the only way to bound an image --
@@ -45,6 +46,10 @@ IMAGE_DISPLAY_PX = 560
 _CODE = re.compile(r"`([^`]+)`")
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC = re.compile(r"(?<![\w*])_([^_]+)_(?![\w*])")
+# `[label](url)`. Runs last so a link's label can carry the spans above.
+# Deliberately does not match `![alt](path)` -- images are a block construct,
+# handled in `to_html` before any inline pass sees the line.
+_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
 
 _FENCE = re.compile(r"^```\s*([A-Za-z0-9_+-]*)\s*$")
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -63,7 +68,35 @@ def _inline(text: str) -> str:
     )
     out = _BOLD.sub(r"<b>\1</b>", out)
     out = _ITALIC.sub(r"<i>\1</i>", out)
+    out = _LINK.sub(_link_html, out)
     return out
+
+
+def _link_html(match: re.Match) -> str:
+    """One inline ``[label](url)``.
+
+    **Only the report's own controls become clickable.** ``bpilot:hide/<id>``
+    and friends (see ``report_builder.CONTROL_SCHEME``) are drawn small and
+    muted, so a heading still reads as a heading rather than as a row of
+    buttons; they are emitted for the live panel only, never into an export.
+
+    Everything else renders as inert text showing both label and target. That
+    is deliberate, and it is a security boundary rather than a limitation: the
+    body of this document is arbitrary text from the kernel, from a pasted
+    note, or drafted by AutoPILOT, and ``report_panel._on_anchor`` hands a
+    local-file anchor to ``QDesktopServices.openUrl``. Turning bracket syntax
+    in untrusted prose into a live ``file://`` link would make "click here" in
+    a note enough to open something on the operator's machine. Prose links in
+    a lab record were never a requirement; this surface is not worth having.
+    """
+    label, url = match.group(1), match.group(2)
+    if url.startswith(f"{CONTROL_SCHEME}:"):
+        return (
+            f'<a href="{html.escape(url, quote=True)}" style="color:{S.MUTED}; '
+            f'font-size:{S.px(10)}px; font-weight:normal; '
+            f'text-decoration:none;">[{label}]</a>'
+        )
+    return f'{label} (<span style="color:{S.MUTED};">{url}</span>)'
 
 
 def _heading_html(level: int, text: str) -> str:
@@ -121,7 +154,9 @@ def _quote_html(lines: list[str]) -> str:
     )
 
 
-def _image_html(alt: str, rel: str, base_dir: str, embed: bool) -> str:
+def _image_html(
+    alt: str, rel: str, base_dir: str, embed: bool, cap_px: int | None = None
+) -> str:
     """A figure, bounded to the panel width and captioned underneath.
 
     `base_dir` is the experiment folder the stored path is relative to. With
@@ -153,7 +188,7 @@ def _image_html(alt: str, rel: str, base_dir: str, embed: bool) -> str:
         source = url
 
     natural = QtGui.QImageReader(path).size()
-    cap = S.px(IMAGE_DISPLAY_PX)
+    cap = S.px(cap_px or IMAGE_DISPLAY_PX)
     width = min(natural.width(), cap) if natural.isValid() and natural.width() > 0 else cap
 
     img = (
@@ -205,7 +240,13 @@ def _table_html(rows: list[list[str]]) -> str:
     return "".join(out)
 
 
-def to_html(markdown: str, *, base_dir: str = "", embed_images: bool = False) -> str:
+def to_html(
+    markdown: str,
+    *,
+    base_dir: str = "",
+    embed_images: bool = False,
+    image_px: int | None = None,
+) -> str:
     """Render `markdown` to a themed HTML document for a ``QTextBrowser``.
 
     Handles exactly what :mod:`report_builder` emits: HTML comments (dropped),
@@ -217,7 +258,9 @@ def to_html(markdown: str, *, base_dir: str = "", embed_images: bool = False) ->
     `base_dir` is the experiment folder that figure paths are relative to;
     without it images are looked up relative to the process's own directory,
     which is why every real caller passes it. `embed_images` inlines them as
-    ``data:`` URIs for a self-contained HTML export.
+    ``data:`` URIs for a self-contained HTML export. `image_px` overrides the
+    figure width cap, which the PDF exporter uses to size figures for a page
+    rather than for a docked panel.
     """
     parts: list[str] = []
     lines = (markdown or "").splitlines()
@@ -268,7 +311,9 @@ def to_html(markdown: str, *, base_dir: str = "", embed_images: bool = False) ->
         image = ri.IMAGE_MD.match(line.strip())
         if image:
             parts.append(
-                _image_html(image.group(1), image.group(2), base_dir, embed_images)
+                _image_html(
+                    image.group(1), image.group(2), base_dir, embed_images, image_px
+                )
             )
             i += 1
             continue
@@ -318,3 +363,80 @@ def _is_block_start(line: str) -> bool:
         or ri.IMAGE_MD.match(stripped)
         or _COMMENT_OPEN.match(line)
     )
+
+
+# ── PDF export ───────────────────────────────────────────────────────────────
+# Qt's own print pipeline, not a new dependency: `QTextDocument.print_()` lays
+# the same HTML this module already produces onto pages and `QPrinter` writes
+# them out. QtPrintSupport ships with the conda `pyqt` build the beamline env
+# pins, but the import is guarded anyway so a stripped install loses the PDF
+# option rather than the whole Report panel (see report_panel's export menu).
+
+try:
+    from PyQt5 import QtPrintSupport
+    PDF_AVAILABLE = True
+except ImportError:  # pragma: no cover -- depends on how PyQt5 was installed
+    QtPrintSupport = None
+    PDF_AVAILABLE = False
+
+#: Theme a printed report is rendered under, whatever the session is using.
+#: A dark session's near-white body text on white paper is unreadable, and the
+#: palette is read from `style`'s globals at call time, so the only way to fix
+#: it is to rebind them for the duration of the render.
+PRINT_THEME = "light"
+
+#: Figure width on the page, in the same logical pixels the rest of the
+#: document is laid out in. Sized against the ~660 px A4 text column below
+#: rather than against the dock.
+PDF_IMAGE_PX = 520
+
+PDF_MARGINS_MM = (16, 16, 16, 16)  # left, top, right, bottom
+
+#: Logical width the document is laid out at before Qt scales it onto the
+#: page. Roughly a screen's worth of text column, which is what the font
+#: sizes in this module were chosen against.
+PDF_PAGE_PX = 610
+
+
+def export_pdf(markdown: str, *, base_dir: str, path: str, title: str = "") -> bool:
+    """Write `markdown` to a self-contained PDF at `path`; ``True`` on success.
+
+    **Figures are referenced, not inlined.** Every other export path that has
+    to stand alone either base64s the pixels (HTML) or copies them next to the
+    file (Markdown), but a PDF needs neither: ``QTextDocument`` resolves the
+    ``file:`` URLs this module already emits and Qt embeds the decoded pixels
+    into the PDF itself. So the one-file promise holds without ever building a
+    multi-megabyte ``data:`` string.
+
+    The whole render runs under :func:`style.temporary_theme`, which also pins
+    the UI-scale multiplier to 1.0 -- a document's type size must not depend on
+    how large the operator likes their widgets.
+    """
+    if not PDF_AVAILABLE:
+        return False
+
+    with S.temporary_theme(PRINT_THEME, scale=1.0):
+        body = to_html(markdown, base_dir=base_dir, image_px=PDF_IMAGE_PX)
+        # An explicit white ground and dark default: a PDF viewer paints no
+        # background of its own, and any text this module did not colour
+        # explicitly would otherwise inherit the widget default.
+        document = QtGui.QTextDocument()
+        document.setHtml(
+            f"<body style='background-color:#ffffff; color:{S.TEXT};'>{body}</body>"
+        )
+
+    printer = QtPrintSupport.QPrinter(QtPrintSupport.QPrinter.HighResolution)
+    printer.setOutputFormat(QtPrintSupport.QPrinter.PdfFormat)
+    printer.setOutputFileName(path)
+    printer.setPageSize(QtPrintSupport.QPrinter.A4)
+    printer.setPageMargins(*PDF_MARGINS_MM, QtPrintSupport.QPrinter.Millimeter)
+    if title:
+        printer.setDocName(title)
+
+    # Lay the document out at a screen-like width and let `print_` scale that
+    # to the page. Without this the document is laid out directly in the
+    # printer's device units (thousands of dots across at HighResolution) and
+    # the type comes out microscopic.
+    document.setPageSize(QtCore.QSizeF(PDF_PAGE_PX, PDF_PAGE_PX * 1.414))
+    document.print_(printer)
+    return os.path.isfile(path)

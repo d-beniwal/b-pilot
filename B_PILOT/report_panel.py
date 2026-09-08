@@ -33,6 +33,7 @@ from PyQt5 import QtWidgets
 from . import config
 from . import report_builder
 from . import report_images as ri
+from . import report_organize as ro
 from . import report_render
 from . import report_store as rs
 from . import style as S
@@ -54,6 +55,12 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         self._console = None          # set by main_window via set_console()
         self._console_ready = False
         self._sources: tuple[int, int] = (-1, -1)
+        # Last resolved entry list. Everything that acts on a specific block --
+        # the inline controls, the Arrange list, the placement pickers -- works
+        # from this rather than re-reading the file, so a click can never act
+        # on an ordering the user is not currently looking at.
+        self._entries: list[dict] = []
+        self._arrange_signature: tuple = ()
 
         body = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(body)
@@ -64,6 +71,15 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         self._subject.setStyleSheet(f"color:{S.MUTED};")
         header.addWidget(self._subject)
         header.addStretch(1)
+        self._show_hidden = QtWidgets.QCheckBox("Show hidden")
+        self._show_hidden.setToolTip(
+            "Bring hidden entries back into view, marked and with the reason "
+            "they were suppressed.\nHiding never deletes anything — every entry "
+            "stays in the report file on disk.\nExports always leave hidden "
+            "entries out."
+        )
+        self._show_hidden.toggled.connect(self.refresh)
+        header.addWidget(self._show_hidden)
         self._follow = QtWidgets.QCheckBox("Follow")
         self._follow.setChecked(True)
         self._follow.setToolTip(
@@ -89,6 +105,14 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         )
         layout.addWidget(self._view, 1)
 
+        # Hidden until asked for: most of the time the report is something to
+        # read, and the arranging tools would only crowd it.
+        self._arrange = ro.ArrangeList()
+        self._arrange.setVisible(False)
+        self._arrange.moved.connect(self._on_arrange_moved)
+        self._arrange.visibility_changed.connect(self._on_arrange_visibility)
+        layout.addWidget(self._arrange)
+
         buttons = QtWidgets.QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         self._snapshot_btn = self._button(
@@ -105,6 +129,14 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             self._button("§ Heading", "Start a new titled section in the report.", self._on_heading)
         )
         buttons.addStretch(1)
+        self._arrange_btn = QtWidgets.QPushButton("⇅ Arrange")
+        self._arrange_btn.setCheckable(True)
+        self._arrange_btn.setToolTip(
+            "Show the entry list: drag entries to reorder the report, "
+            "untick one to hide it.\nCapture timestamps are never changed."
+        )
+        self._arrange_btn.toggled.connect(self._on_arrange_toggled)
+        buttons.addWidget(self._arrange_btn)
         buttons.addWidget(
             self._button("⟳ Rebuild", "Re-read the kernel history and rebuild the report now.", self.refresh)
         )
@@ -250,13 +282,32 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         if sources != self._sources:
             self.refresh()
 
-    def _markdown(self, *, persist: bool = True) -> str:
-        """The report as Markdown, reconciling new runs into the master file."""
+    @staticmethod
+    def _exclusions() -> list:
+        """Plan names the active profile keeps out of the report.
+
+        Read fresh on every collect rather than cached, so a change in
+        Configuration -> Reports takes effect on the next poll with nothing to
+        rebuild -- excluded runs are still recorded, only suppressed.
+        """
+        return config.get("report_excluded_plans") or []
+
+    def _collect(self, *, persist: bool = True) -> list[dict]:
+        return report_builder.collect(
+            self._beamline,
+            self._experiment,
+            persist=persist,
+            exclude=self._exclusions(),
+        )
+
+    def _markdown(self, entries: list[dict], *, controls: bool, show_hidden: bool) -> str:
         return report_builder.render_markdown(
-            report_builder.collect(self._beamline, self._experiment, persist=persist),
+            entries,
             experiment=self._experiment,
             beamline=self._beamline,
             title=config.get("report_title") or "",
+            show_hidden=show_hidden,
+            controls=controls,
         )
 
     def refresh(self) -> None:
@@ -267,7 +318,10 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         # entries it reconciles, so sampling afterwards would store a size the
         # next poll immediately disagrees with and rebuild on every tick.
         self._sources = rs.source_state(self._beamline, self._experiment)
-        markdown = self._markdown()
+        self._entries = self._collect()
+        markdown = self._markdown(
+            self._entries, controls=True, show_hidden=self._show_hidden.isChecked()
+        )
         self._sources = rs.source_state(self._beamline, self._experiment)
 
         bar = self._view.verticalScrollBar()
@@ -277,6 +331,27 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             report_render.to_html(markdown, base_dir=self._base_dir())
         )
         bar.setValue(bar.maximum() if at_end else min(previous, bar.maximum()))
+        self._sync_arrange()
+
+    def _sync_arrange(self) -> None:
+        """Refill the Arrange list, but only when it would actually differ.
+
+        The panel polls every second. Rebuilding a ``QListWidget`` on each tick
+        would cancel a drag mid-gesture and drop the selection, so the rows are
+        only rebuilt when their content or order has genuinely moved.
+        """
+        # `isVisibleTo`, not `isVisible`: the question is whether the user has
+        # switched the list on, and `isVisible` is also false whenever the dock
+        # as a whole is closed or floating behind something.
+        if not self._arrange.isVisibleTo(self):
+            return
+        # Always every entry, hidden included: the list is how a hidden entry
+        # is found and brought back, so filtering it there would be a trap.
+        signature = ro.signature(self._entries)
+        if signature == self._arrange_signature:
+            return
+        self._arrange_signature = signature
+        self._arrange.populate(self._entries)
 
     def _base_dir(self) -> str:
         """Experiment folder that stored figure paths are relative to."""
@@ -285,9 +360,78 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         return ri.base_dir(self._beamline, self._experiment)
 
     def _on_anchor(self, url: QtCore.QUrl) -> None:
-        """Open a clicked figure full size in the desktop's image viewer."""
-        if url.isLocalFile():
+        """A click in the rendered report.
+
+        Exactly two things are actionable: one of the report's own control
+        links (``bpilot:hide/<id>``), and a figure, which opens full size in the
+        desktop's image viewer. Anything else -- a link in a note someone
+        typed -- is deliberately inert; the panel sets
+        ``setOpenLinks(False)``, so nothing navigates on its own.
+        """
+        if url.scheme() == report_builder.CONTROL_SCHEME:
+            verb, _, identity = url.path().partition("/")
+            self._apply_control(verb, identity)
+            return
+        if url.isLocalFile() and self._is_own_figure(url.toLocalFile()):
             QtGui.QDesktopServices.openUrl(url)
+
+    def _is_own_figure(self, path: str) -> bool:
+        """Whether `path` is a figure this experiment actually stores.
+
+        Belt and braces behind ``report_render._link_html``, which already
+        refuses to make anything but a control link clickable. Handing a path
+        to ``QDesktopServices`` opens it with whatever the desktop has
+        registered, so the one place that does it should confirm the file came
+        from us rather than from text that happened to reach the document.
+        """
+        if not (self._beamline and self._experiment):
+            return False
+        figures = os.path.realpath(ri.figures_dir(self._beamline, self._experiment))
+        return os.path.realpath(path).startswith(figures + os.sep)
+
+    # ---------------------------------------------------------- arranging --
+
+    def _write_edits(self, edits: list[dict]) -> None:
+        """Persist overlay entries and re-render. No-op for an empty list."""
+        if not edits or not (self._beamline and self._experiment):
+            return
+        if not rs.append_edits(self._beamline, self._experiment, edits):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Report not updated",
+                "The change could not be written to the report file:\n"
+                + rs.report_path(self._beamline, self._experiment),
+            )
+        self.refresh()
+
+    def _apply_control(self, verb: str, identity: str) -> None:
+        """One of the inline ``[hide] [↑] [↓]`` links."""
+        if not identity:
+            return
+        if verb in ("hide", "show"):
+            self._write_edits([{"target": identity, "hidden": verb == "hide"}])
+            return
+        if verb in ("up", "down"):
+            self._write_edits(
+                report_builder.plan_step(
+                    self._entries, identity, -1 if verb == "up" else 1
+                )
+            )
+
+    def _on_arrange_toggled(self, shown: bool) -> None:
+        self._arrange.setVisible(shown)
+        if shown:
+            # Force a fill: the signature is unchanged from when the list was
+            # last populated, but the rows were thrown away by `clear`.
+            self._arrange_signature = ()
+            self._sync_arrange()
+
+    def _on_arrange_moved(self, moved_id: str, after_id: str) -> None:
+        """A drag landed. Compute the position override and record it."""
+        self._write_edits(report_builder.plan_move(self._entries, moved_id, after_id))
+
+    def _on_arrange_visibility(self, identity: str, visible: bool) -> None:
+        self._write_edits([{"target": identity, "hidden": not visible}])
 
     # -------------------------------------------------------------- actions --
 
@@ -321,21 +465,50 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         )
         return False
 
+    def _append_placed(self, kind: str, after_id: str, **fields) -> dict | None:
+        """Append a new entry, filed after `after_id` (``""`` = at the end).
+
+        The placement is a ``pos`` override and nothing else: the entry's ``ts``
+        still records when it was actually captured, which is the property that
+        makes this safe to offer at all. Filing at the end needs no override,
+        so the common case leaves the record exactly as it was.
+        """
+        position, prerequisites = report_builder.plan_insert(self._entries, after_id)
+        if prerequisites:
+            rs.append_edits(self._beamline, self._experiment, prerequisites)
+        if position is not None:
+            fields["pos"] = position
+        event = rs.append_event(self._beamline, self._experiment, kind, **fields)
+        self.refresh()
+        return event
+
+    def _ask_entry(self, title: str, prompt: str, *, multiline: bool = True):
+        """Run an :class:`report_organize.EntryDialog`; ``None`` if cancelled."""
+        dlg = ro.EntryDialog(
+            title, prompt, self._entries, multiline=multiline, parent=self
+        )
+        # A row selected in the Arrange list is a stated interest in that point
+        # in the report, so offer it as the destination.
+        dlg.preselect(self._arrange.selected_id())
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+        return dlg
+
     def _on_note(self) -> None:
         if not self._require_experiment():
             return
-        text, ok = QtWidgets.QInputDialog.getMultiLineText(self, "Add note", "Note:")
-        if ok and text.strip():
-            rs.append_event(self._beamline, self._experiment, rs.NOTE, text=text.strip())
-            self.refresh()
+        dlg = self._ask_entry("Add note", "Note:")
+        if dlg is None or not dlg.text():
+            return
+        self._append_placed(rs.NOTE, dlg.after_id(), text=dlg.text())
 
     def _on_heading(self) -> None:
         if not self._require_experiment():
             return
-        text, ok = QtWidgets.QInputDialog.getText(self, "New section", "Section title:")
-        if ok and text.strip():
-            rs.append_event(self._beamline, self._experiment, rs.HEADING, title=text.strip())
-            self.refresh()
+        dlg = self._ask_entry("New section", "Section title:", multiline=False)
+        if dlg is None or not dlg.text():
+            return
+        self._append_placed(rs.HEADING, dlg.after_id(), title=dlg.text())
 
     def _on_snapshot(self) -> None:
         if not self._require_experiment():
@@ -354,14 +527,12 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         rows = dlg.captured_rows()
         if not rows:
             return
-        rs.append_event(
-            self._beamline,
-            self._experiment,
-            rs.SNAPSHOT,
-            title=dlg.captured_title(),
-            rows=rows,
+        # Filed at the end, deliberately: a snapshot is a reading of the
+        # beamline *right now*, so unlike a note or a figure there is no
+        # earlier moment it could belong to. It can still be dragged later.
+        self._append_placed(
+            rs.SNAPSHOT, "", title=dlg.captured_title(), rows=rows
         )
-        self.refresh()
 
     def _on_paste_image(self) -> None:
         if not self._require_experiment():
@@ -396,12 +567,17 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         self._add_image(image)
 
     def _add_image(self, image) -> None:
-        """Caption, store, record. Asking first means a cancel leaves no file."""
-        caption, ok = QtWidgets.QInputDialog.getText(
-            self, "Add figure", "Caption (optional):"
-        )
-        if not ok:
+        """Caption, place, store, record.
+
+        Asking first means a cancel leaves no orphan file behind -- and the
+        same dialog is where the figure's position is chosen, which is the
+        common case for a screenshot: it is taken minutes after the scan it
+        illustrates and belongs next to it, not at the bottom.
+        """
+        dlg = self._ask_entry("Add figure", "Caption (optional):", multiline=False)
+        if dlg is None:
             return
+        caption = dlg.text()
         stored = ri.store_image(self._beamline, self._experiment, image)
         if stored is None:
             QtWidgets.QMessageBox.warning(
@@ -411,43 +587,55 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 + ri.figures_dir(self._beamline, self._experiment),
             )
             return
-        rs.append_event(
-            self._beamline,
-            self._experiment,
-            rs.IMAGE,
-            title=caption.strip(),
-            **stored,
-        )
-        self.refresh()
+        self._append_placed(rs.IMAGE, dlg.after_id(), title=caption, **stored)
 
     def _on_export(self) -> None:
-        """Save a standalone copy -- Markdown, or self-contained HTML.
+        """Save a standalone copy -- PDF, Markdown, or self-contained HTML.
 
-        "Standalone" has to hold for figures too. HTML inlines them as
-        ``data:`` URIs, so the export stays one file. Markdown cannot inline
-        anything, so the figures are copied into a ``<name>_figures/`` folder
-        beside the ``.md`` and the links rewritten -- otherwise the export
-        would point back into the live session directory and break the moment
-        it was mailed to anyone.
+        "Standalone" has to hold for figures too, and each format gets there
+        differently: a PDF has the pixels embedded in it by Qt's own print
+        pipeline, HTML inlines them as ``data:`` URIs, and Markdown -- which
+        cannot inline anything -- gets them copied into a ``<name>_figures/``
+        folder beside the ``.md`` with the links rewritten. Without that last
+        step the export would point back into the live session directory and
+        break the moment it was mailed to anyone.
+
+        Hidden entries and the panel's inline controls are left out of every
+        format. An export is a document, not a copy of the editor.
         """
         if not self._require_experiment():
             return
+        formats = ["Markdown (*.md)", "HTML (*.html)"]
+        if report_render.PDF_AVAILABLE:
+            formats.insert(0, "PDF (*.pdf)")
+        suffix = ".pdf" if report_render.PDF_AVAILABLE else ".md"
         default = os.path.join(
             os.path.expanduser("~"),
-            f"report_{self._experiment}_{time.strftime('%Y%m%d')}.md".replace(" ", "_"),
+            f"report_{self._experiment}_{time.strftime('%Y%m%d')}{suffix}".replace(" ", "_"),
         )
         path, selected = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export report", default, "Markdown (*.md);;HTML (*.html)"
+            self, "Export report", default, ";;".join(formats)
         )
         if not path:
             return
-        markdown = self._markdown()
+
+        kind = self._export_kind(path, selected)
+        wanted = f".{kind}"
+        if not path.lower().endswith(wanted):
+            path += wanted
+
+        markdown = self._markdown(self._collect(), controls=False, show_hidden=False)
         base = self._base_dir()
-        wants_html = selected.startswith("HTML") or path.lower().endswith(".html")
-        if wants_html and not path.lower().endswith(".html"):
-            path += ".html"
         try:
-            if wants_html:
+            if kind == "pdf":
+                if not report_render.export_pdf(
+                    markdown, base_dir=base, path=path, title=self._experiment
+                ):
+                    QtWidgets.QMessageBox.warning(
+                        self, "Export failed", f"The PDF could not be written to:\n{path}"
+                    )
+                    return
+            elif kind == "html":
                 body = report_render.to_html(markdown, base_dir=base, embed_images=True)
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(
@@ -467,6 +655,24 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             QtWidgets.QMessageBox.warning(self, "Export failed", str(exc))
             return
         QtWidgets.QMessageBox.information(self, "Report exported", f"Saved to:\n{path}")
+
+    @staticmethod
+    def _export_kind(path: str, selected: str) -> str:
+        """``"pdf"`` / ``"html"`` / ``"md"``.
+
+        An explicit extension the user typed wins over the filter dropdown --
+        on some platforms the dialog reports a filter the user never touched,
+        and the filename is the less ambiguous statement of intent.
+        """
+        lowered = path.lower()
+        for kind in ("pdf", "html", "md"):
+            if lowered.endswith(f".{kind}"):
+                return kind
+        if selected.startswith("PDF"):
+            return "pdf"
+        if selected.startswith("HTML"):
+            return "html"
+        return "md"
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         """Hiding the dock stops the poll; the report on disk is unaffected."""

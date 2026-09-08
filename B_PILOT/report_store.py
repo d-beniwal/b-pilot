@@ -26,6 +26,14 @@ the same lock-free reasoning as :func:`experiment_history.append_entry`, not
 the ``flock`` pattern the mutable stores use (``queue_store``,
 ``det_startup_state``).
 
+**Editing is an append, never a rewrite.** Moving a block or hiding it does not
+touch the entry it acts on: it appends an :data:`EDIT` entry naming that
+entry's ``id`` and the fields to override (see
+:func:`report_builder.apply_edits`). So the record is lossless -- a hidden
+figure is still on disk, a reordered note still carries the timestamp it was
+captured at -- and the single-``write()`` durability argument above survives
+unchanged, which a rewritten document would not.
+
 Every write is best-effort (``try/except OSError: pass``). Failing to record a
 note must never take down a run in progress.
 """
@@ -34,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 
 from . import experiment_history as eh
 
@@ -45,6 +54,7 @@ SNAPSHOT = "snapshot"    # a captured table of live device values
 IMAGE = "image"          # a figure; the pixels are a sidecar file (report_images)
 HEADING = "heading"      # a section break
 AGENT = "agent"          # a block a person accepted from AutoPILOT
+EDIT = "edit"            # an overlay on another entry: {target, pos?, hidden?}
 
 REPORT_FILENAME = "report.jsonl"
 
@@ -81,6 +91,13 @@ def current_experiment(beamline: str) -> str:
     return (known[0].get("name") or "") if known else ""
 
 
+def new_id() -> str:
+    """A fresh entry id. Random rather than sequential: two writers appending
+    at once (the GUI and the detached queue runner) must never collide, and
+    nothing here can see the other's last-used number."""
+    return uuid.uuid4().hex[:12]
+
+
 def append_event(
     beamline: str,
     experiment: str,
@@ -95,7 +112,15 @@ def append_event(
     snapshot's ``rows``, a run's ``plan_name``/``ok``/``end_ts``, a note's
     ``text``. They must be JSON-serialisable -- snapshot rows are lists of
     lists rather than tuples for exactly that reason.
+
+    Two fields are common to every kind. ``id`` identifies the entry so an
+    :data:`EDIT` can name it; one is generated unless the caller supplies it
+    (:func:`report_builder.collect` does, because a run is written twice and
+    both writes must share an identity). ``pos`` is the optional sort override
+    that lets an entry be filed somewhere other than its own timestamp -- see
+    :func:`report_builder.sort_key`.
     """
+    fields.setdefault("id", new_id())
     event = {"ts": ts if ts is not None else time.time(), "kind": kind, **fields}
     # Reuse the history store's meta.json bootstrap so a report started before
     # any kernel activity still records the experiment's real display name.
@@ -107,6 +132,26 @@ def append_event(
     except OSError:
         return None
     return event
+
+
+def append_edits(beamline: str, experiment: str, edits: list[dict]) -> bool:
+    """Append overlay entries; ``True`` if every one was written.
+
+    Each edit is ``{"target": <entry id>, "pos": <float>?, "hidden": <bool>?}``.
+    They are written one line at a time rather than batched, keeping the
+    one-entry-per-``write()`` guarantee that makes concurrent appends safe; a
+    reordering that renormalises the whole report is therefore several lines,
+    which is exactly what it should be.
+    """
+    ok = True
+    for edit in edits:
+        target = edit.get("target")
+        if not target:
+            continue
+        fields = {k: v for k, v in edit.items() if k != "target"}
+        if append_event(beamline, experiment, EDIT, target=target, **fields) is None:
+            ok = False
+    return ok
 
 
 def read_events(beamline: str, experiment: str) -> list[dict]:
