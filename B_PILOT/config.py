@@ -190,6 +190,34 @@ DEFAULTS: dict = {
             ],
         }
     ],
+    # Mirror the report to a remote read-only web viewer, so collaborators who
+    # are not at the beamline can follow it live (see B_PILOT/report_sync.py
+    # and the report_server/ service in this repo). Outbound only: the
+    # workstation opens no port and accepts nothing from the network.
+    #
+    # THESE TWO KEYS DO NOT ARM THE FEATURE ON THEIR OWN, and that is
+    # deliberate. Sync also requires BPILOT_REPORT_SYNC_TOKEN in the
+    # environment, which is not a config key and never will be. active_config.
+    # json is committed and the beamline runs on shared accounts, so a flag
+    # alone would start pushing from every checkout of this profile --
+    # a colleague's workstation, a dev laptop -- to a service nobody there
+    # chose. Requiring something that lives only in the environment makes the
+    # committed flag harmless wherever it wasn't intended. Same reasoning, and
+    # the same ~/.bashrc line, as ARGO_API_KEY (see .context/DEPLOY.md).
+    #
+    # Even fully armed this publishes nothing until the user shares a specific
+    # experiment from the Report panel; sharing is per experiment, never
+    # per profile.
+    "report_sync_enabled": False,
+    # Base URL of the viewer service, e.g. "https://reports.inside.anl.gov".
+    # A beamline fact like qs_zmq_control_addr, so it belongs in the committed
+    # profile -- unlike the push token, which never does.
+    "report_sync_url": "",
+    # Longest the remote copy may lag the local record, in seconds. One number
+    # does for the whole debounce: it is the ceiling that stops a plan
+    # streaming output into history.jsonl from starving the push, and the
+    # quiet period that coalesces a burst of edits is derived from it.
+    "report_sync_interval_s": 5,
     # Auto-start MIDAS_GUI's live view when a Run/Queue dispatch involves an
     # area_detector device (see B_PILOT/midas_bridge.py). On by default -- a
     # no-op if MIDAS_GUI isn't running; never auto-launches it. Toggled from

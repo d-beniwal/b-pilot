@@ -102,6 +102,17 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 "⤓ Export", "Save a standalone copy of this report.", self._on_export
             )
         )
+        # Remote mirroring. The whole cluster stays hidden unless sync is armed
+        # on this machine (profile flag + service URL + BPILOT_REPORT_SYNC_TOKEN
+        # in the environment), so a workstation that never opted in shows no
+        # trace of the feature -- see report_sync.enabled().
+        self._share_btn = self._button(
+            "🌐 Share…", "Publish a read-only, live copy of this report.", self._on_share
+        )
+        header.addWidget(self._share_btn)
+        self._share_chip = QtWidgets.QLabel("")
+        self._share_chip.setStyleSheet(f"color:{S.MUTED};")
+        header.addWidget(self._share_chip)
         layout.addLayout(header)
 
         self._view = QtWidgets.QTextBrowser()
@@ -335,6 +346,9 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         self._timer.stop()
 
     def _poll(self) -> None:
+        # Before the subject guard: the share cluster must be able to hide
+        # itself even when no experiment is loaded.
+        self._refresh_share_chip()
         if not (self._beamline and self._experiment):
             return
         sources = rs.source_state(self._beamline, self._experiment)
@@ -684,6 +698,196 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             )
             return
         self._append_placed(rs.IMAGE, dlg.after_id(), title=caption, **stored)
+
+    # ── remote mirroring ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _sync():
+        """The sync module, or ``None`` when the feature is switched off.
+
+        Gated on the config flag *before* importing so that a workstation with
+        sync off never even loads the module -- no thread, no socket, nothing
+        to prove absent. Callers must treat ``None`` as "feature not present".
+        """
+        if not config.get("report_sync_enabled"):
+            return None
+        try:
+            from . import report_sync
+            return report_sync
+        except Exception:  # noqa: BLE001 -- mirroring must never break the panel
+            return None
+
+    def _refresh_share_chip(self) -> None:
+        """Keep the share button and status chip in step with the worker.
+
+        Read-only: this reflects what the sync worker is doing, and never
+        drives it. The worker runs its own poll precisely so that closing this
+        dock does not stop the remote from updating.
+        """
+        sync = self._sync()
+        if sync is None or not sync.enabled():
+            self._share_btn.setVisible(False)
+            self._share_chip.setVisible(False)
+            return
+        self._share_btn.setVisible(True)
+        state = sync.state()
+        shared = bool(
+            self._beamline
+            and self._experiment
+            and sync.is_shared(self._beamline, self._experiment)
+        )
+        self._share_btn.setText("🌐 Sharing…" if shared else "🌐 Share…")
+        self._share_chip.setVisible(shared)
+        if not shared:
+            return
+
+        status = state.get("status")
+        colour, text = S.MUTED, "not pushed yet"
+        if status == "ok" and state.get("pushed_at"):
+            colour = S.SUCCESS
+            text = "live · " + time.strftime("%H:%M", time.localtime(state["pushed_at"]))
+        elif status == "pushing":
+            text = "pushing…"
+        elif status == "retrying":
+            colour, text = S.WARNING, "retrying…"
+        elif status == "auth_error":
+            colour, text = S.ERROR, "token rejected"
+        elif status == "revoked":
+            colour, text = S.ERROR, "link revoked"
+        elif status == "error":
+            colour, text = S.ERROR, "sync problem"
+        self._share_chip.setStyleSheet(f"color:{colour};")
+        self._share_chip.setText(f"🌐 {text}")
+        tip = [state.get("url") or "", "Read-only link — anyone who has it can read this report."]
+        if state.get("error"):
+            tip.append("")
+            tip.append(str(state["error"]))
+        self._share_chip.setToolTip("\n".join(t for t in tip if t is not None))
+
+    def _on_share(self) -> None:
+        if not (self._beamline and self._experiment):
+            return
+        sync = self._sync()
+        if sync is None or not sync.enabled():
+            self._explain_sync_off()
+            return
+        if sync.is_shared(self._beamline, self._experiment):
+            self._manage_share(sync)
+        else:
+            self._start_share(sync)
+
+    def _explain_sync_off(self) -> None:
+        """Say exactly which of the three conditions is missing.
+
+        This is the first place someone looks when they switched sync on and
+        nothing happened, and "it needs three things" is not a useful answer
+        unless it also says which one is absent.
+        """
+        try:
+            from . import report_sync
+        except Exception:  # noqa: BLE001
+            return
+        missing = []
+        if not config.get("report_sync_enabled"):
+            missing.append("• Configuration → Reports → “Mirror this report to a remote viewer”")
+        if not report_sync.service_url():
+            missing.append("• Configuration → Reports → the viewer service URL")
+        if not report_sync.push_token():
+            missing.append(
+                f"• the {report_sync.TOKEN_ENV} environment variable, exported before\n"
+                "  B-PILOT starts (add it to the same shell line that launches the GUI)"
+            )
+        QtWidgets.QMessageBox.information(
+            self,
+            "Remote sharing is not set up",
+            "Sharing needs all three of these, and this machine is missing:\n\n"
+            + "\n".join(missing)
+            + "\n\nThe token deliberately lives in the environment rather than in the\n"
+            "profile: profiles are shared between workstations, and a token in one\n"
+            "would start publishing from machines that never opted in.",
+        )
+
+    def _start_share(self, sync) -> None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Share this report")
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setText(f"Publish a live, read-only copy of “{self._experiment}”?")
+        box.setInformativeText(
+            "Anyone with the link can read this report, without an account and "
+            "without any access to this workstation.\n\n"
+            "The link is unguessable, but it is a key: whoever it is forwarded "
+            "to keeps access until you rotate or stop it. Hidden entries and "
+            "excluded plans are not published, and hiding an entry later also "
+            "removes its figures from the remote copy."
+        )
+        box.setStandardButtons(QtWidgets.QMessageBox.Cancel)
+        share = box.addButton("Share", QtWidgets.QMessageBox.AcceptRole)
+        box.exec_()
+        if box.clickedButton() is not share:
+            return
+        url = sync.share(self._beamline, self._experiment)
+        self._show_link(url, "Sharing started")
+
+    def _manage_share(self, sync) -> None:
+        url = sync.view_url(self._beamline, self._experiment)
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Sharing")
+        box.setText(f"“{self._experiment}” is being mirrored.")
+        box.setInformativeText(url + "\n\nRead-only. Updates automatically.")
+        box.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        copy = box.addButton("Copy link", QtWidgets.QMessageBox.AcceptRole)
+        rotate = box.addButton("New link", QtWidgets.QMessageBox.ActionRole)
+        stop = box.addButton("Stop sharing", QtWidgets.QMessageBox.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.Close)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is copy:
+            QtWidgets.QApplication.clipboard().setText(url)
+        elif clicked is rotate:
+            if self._confirm(
+                "Replace the link?",
+                "The current link stops working and a new one takes its place. "
+                "Anyone still using the old one loses access — which is the point, "
+                "but you will need to send the new link to everyone who should keep it.",
+            ):
+                self._show_link(sync.rotate(self._beamline, self._experiment), "New link")
+        elif clicked is stop:
+            if self._confirm(
+                "Stop sharing?",
+                "The remote copy is deleted and the link stops working.\n\n"
+                "If the service cannot be reached right now, the old link may keep "
+                "working until it can be — the status chip will say so rather than "
+                "claiming otherwise. Nothing on this workstation is affected.",
+            ):
+                sync.stop_sharing(self._beamline, self._experiment)
+                self._refresh_share_chip()
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return (
+            QtWidgets.QMessageBox.question(
+                self,
+                title,
+                text,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            == QtWidgets.QMessageBox.Yes
+        )
+
+    def _show_link(self, url: str, title: str) -> None:
+        self._refresh_share_chip()
+        if not url:
+            return
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText("Anyone with this link can read the report:")
+        box.setInformativeText(url)
+        box.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        copy = box.addButton("Copy link", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton(QtWidgets.QMessageBox.Close)
+        box.exec_()
+        if box.clickedButton() is copy:
+            QtWidgets.QApplication.clipboard().setText(url)
 
     def _on_export(self) -> None:
         """Save a standalone copy -- PDF, Markdown, or self-contained HTML.

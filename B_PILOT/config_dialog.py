@@ -155,7 +155,8 @@ class ConfigDialog(QtWidgets.QDialog):
             ("Scan blocks", self._page(self._build_scan_blocks_card())),
             ("Queue Backend", self._page(self._build_queue_backend_card())),
             ("Data Viewer", self._page(self._build_data_viewer_card())),
-            ("Reports", self._page(self._build_reports_card())),
+            ("Reports",        self._page(self._build_reports_card(),
+                                     self._build_report_sync_card())),
             ("Appearance", self._page(
                 self._build_appearance_card(), self._build_autopilot_card()
             )),
@@ -1282,6 +1283,115 @@ class ConfigDialog(QtWidgets.QDialog):
         card.body.addLayout(row)
         return card
 
+    def _build_report_sync_card(self) -> QtWidgets.QGroupBox:
+        """Remote mirroring: publish a live, read-only copy of the report.
+
+        Kept as its own card rather than folded into Reports above because the
+        thing it controls is categorically different -- everything else on this
+        page changes what the report *is*, and this decides whether it leaves
+        the building.
+        """
+        card = S.make_card("Remote viewer (share the report off-site)")
+
+        blurb = QtWidgets.QLabel(
+            "Mirrors the report to a small web service you run, so collaborators "
+            "who are not at the beamline can follow it live. Traffic is outbound "
+            "only — this workstation opens no port, and a remote reader has no "
+            "access to it or to the instrument."
+        )
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet(f"color: {S.MUTED};")
+        card.body.addWidget(blurb)
+
+        self._report_sync_enabled = QtWidgets.QCheckBox(
+            "Mirror this report to a remote viewer"
+        )
+        self._report_sync_enabled.setToolTip(
+            "Allows sharing. Nothing is published until you press Share on a\n"
+            "specific experiment in the Report panel."
+        )
+        self._report_sync_enabled.toggled.connect(self._on_report_sync_toggled)
+        card.body.addWidget(self._report_sync_enabled)
+
+        url_row = QtWidgets.QHBoxLayout()
+        url_row.addWidget(S.LabelRight("Service URL:"))
+        self._report_sync_url = QtWidgets.QLineEdit()
+        self._report_sync_url.setPlaceholderText("https://reports.example.anl.gov")
+        self._report_sync_url.setToolTip(
+            "Base URL of the viewer service (see report_server/README.md in this\n"
+            "repo). A beamline fact, so it is saved into the profile."
+        )
+        url_row.addWidget(self._report_sync_url, 1)
+        card.body.addLayout(url_row)
+
+        lag_row = QtWidgets.QHBoxLayout()
+        lag_row.addWidget(S.LabelRight("Max lag:"))
+        self._report_sync_interval = QtWidgets.QSpinBox()
+        self._report_sync_interval.setRange(2, 60)
+        self._report_sync_interval.setSuffix(" s")
+        self._report_sync_interval.setToolTip(
+            "Longest the remote copy may trail the local record. Edits made in\n"
+            "quick succession are collapsed into one upload; an unchanged report\n"
+            "is not uploaded at all."
+        )
+        lag_row.addWidget(self._report_sync_interval)
+        lag_row.addStretch(1)
+        card.body.addLayout(lag_row)
+
+        # The status line below is the one thing that makes a missing token
+        # discoverable. Without it the failure mode is "I ticked the box and
+        # nothing happened", with nowhere to look.
+        self._report_sync_status = QtWidgets.QLabel("")
+        self._report_sync_status.setWordWrap(True)
+        card.body.addWidget(self._report_sync_status)
+
+        note = QtWidgets.QLabel(
+            "The push token is read from the BPILOT_REPORT_SYNC_TOKEN environment "
+            "variable and is deliberately not a setting: profiles are committed and "
+            "shared between workstations, so a token stored here would start "
+            "publishing from machines that never opted in. Export it on the same "
+            "shell line that launches B-PILOT, as with ARGO_API_KEY.\n\n"
+            "Links are unguessable and read-only, but they are keys — anyone they "
+            "are forwarded to keeps access until you rotate or stop the share. "
+            "Hidden entries and excluded plans are never published."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {S.MUTED};")
+        card.body.addWidget(note)
+        return card
+
+    def _on_report_sync_toggled(self, on: bool) -> None:
+        """Grey out the settings that only mean anything while sync is on.
+
+        Same treatment as the queue-backend fields (see
+        `_on_queue_backend_changed`).
+        """
+        for widget in (self._report_sync_url, self._report_sync_interval):
+            widget.setEnabled(on)
+        self._refresh_report_sync_status()
+
+    def _refresh_report_sync_status(self) -> None:
+        """Say plainly whether sharing is actually armed on this machine."""
+        from B_PILOT import report_sync
+
+        if not self._report_sync_enabled.isChecked():
+            self._report_sync_status.setText("")
+            return
+        if not report_sync.push_token():
+            self._report_sync_status.setStyleSheet(f"color: {S.WARNING};")
+            self._report_sync_status.setText(
+                f"⚠ {report_sync.TOKEN_ENV} is not set in this process's environment, "
+                "so nothing will be published. Export it and restart B-PILOT."
+            )
+        elif not self._report_sync_url.text().strip():
+            self._report_sync_status.setStyleSheet(f"color: {S.WARNING};")
+            self._report_sync_status.setText("⚠ No service URL yet.")
+        else:
+            self._report_sync_status.setStyleSheet(f"color: {S.SUCCESS};")
+            self._report_sync_status.setText(
+                "✓ Ready. Share an experiment from the Report panel to publish it."
+            )
+
     # -- excluded-plan list helpers -----------------------------------------
 
     def _report_discovered_plans(self) -> list[str]:
@@ -1563,6 +1673,9 @@ class ConfigDialog(QtWidgets.QDialog):
         self._autopilot_enabled.setChecked(bool(cfg.get("autopilot_enabled", False)))
         self._report_enabled.setChecked(bool(cfg.get("report_enabled", True)))
         self._report_title.setText(cfg.get("report_title", "") or "")
+        self._report_sync_enabled.setChecked(bool(cfg.get("report_sync_enabled", False)))
+        self._report_sync_url.setText(cfg.get("report_sync_url", "") or "")
+        self._report_sync_interval.setValue(int(cfg.get("report_sync_interval_s", 5) or 5))
         self._report_load_snapshots(cfg.get("report_snapshot_groups") or [])
         self._report_load_excluded(cfg.get("report_excluded_plans") or [])
 
@@ -1592,6 +1705,7 @@ class ConfigDialog(QtWidgets.QDialog):
         self._qs_user.setText(cfg.get("qs_user") or "")
         self._qs_user_group.setText(cfg.get("qs_user_group") or "")
         self._on_queue_backend_changed()
+        self._on_report_sync_toggled(self._report_sync_enabled.isChecked())
 
         self._databroker_catalog.setText(cfg.get("databroker_catalog") or "")
         self._databroker_uri.setText(cfg.get("databroker_uri") or "")
@@ -1622,6 +1736,9 @@ class ConfigDialog(QtWidgets.QDialog):
             "autopilot_enabled": self._autopilot_enabled.isChecked(),
             "report_enabled": self._report_enabled.isChecked(),
             "report_title": self._report_title.text().strip(),
+            "report_sync_enabled": self._report_sync_enabled.isChecked(),
+            "report_sync_url": self._report_sync_url.text().strip(),
+            "report_sync_interval_s": self._report_sync_interval.value(),
             "report_excluded_plans": self._report_excluded_names(),
             "report_snapshot_groups": self._report_snapshot_values(),
             "device_search_paths": [
@@ -1663,4 +1780,10 @@ class ConfigDialog(QtWidgets.QDialog):
         # Native-only user who just changed an unrelated setting.
         if values.get("queue_backend") == "qs":
             qs_client.reset()  # reconnect against any changed QS connection settings
+        if values.get("report_sync_enabled"):
+            # Guarded for the same reason as qs_client.reset() above: an
+            # unconditional call would import report_sync and spin up its
+            # worker thread for someone who never switched mirroring on.
+            from B_PILOT import report_sync
+            report_sync.reset()
         super().accept()

@@ -1,0 +1,5 @@
+# The viewer service only. NEVER install these into bpilot_mpe_dev -- the
+# beamline environment is carefully pinned and can only be conda-solved on the
+# APS subnet, and nothing here is needed to run B-PILOT itself.
+fastapi>=0.110
+uvicorn[standard]>=0.27
