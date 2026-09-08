@@ -42,6 +42,7 @@ from . import experiment_history as eh
 RUN = "run"              # one plan invocation, with its outcome
 NOTE = "note"            # free prose
 SNAPSHOT = "snapshot"    # a captured table of live device values
+IMAGE = "image"          # a figure; the pixels are a sidecar file (report_images)
 HEADING = "heading"      # a section break
 AGENT = "agent"          # a block a person accepted from AutoPILOT
 

@@ -271,6 +271,16 @@ def _event_markdown(event: dict) -> str:
         out.append("")
         return "\n".join(out)
 
+    if kind == rs.IMAGE:
+        # Standard Markdown image syntax, with a path relative to the
+        # experiment folder -- so an exported .md opens correctly in any
+        # Markdown viewer once `report_images.package_markdown` has copied the
+        # figures next to it. The pixels are a sidecar file; see report_images.
+        head = title or "Figure"
+        return "\n".join(
+            [f"#### 🖼 {head} — {stamp}", "", f"![{head}]({event.get('file') or ''})", ""]
+        )
+
     if kind == rs.AGENT:
         # Always labelled: a reader must be able to tell agent-written prose
         # from the instrument's own record at a glance.

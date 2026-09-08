@@ -23,9 +23,21 @@ session.
 from __future__ import annotations
 
 import html
+import os
 import re
 
+from PyQt5 import QtCore
+from PyQt5 import QtGui
+
+from . import report_images as ri
 from . import style as S
+
+#: Widest a figure is drawn in the panel. Qt's rich-text engine has no
+#: ``max-width``, so a width *attribute* is the only way to bound an image --
+#: which means the intrinsic size has to be read to avoid upscaling a small
+#: one. ``QImageReader`` answers that from the file header alone, without
+#: decoding the pixels.
+IMAGE_DISPLAY_PX = 560
 
 # --- inline spans, applied to already-escaped text ---------------------------
 # Escaping only rewrites & < > ", none of which appear in these markers, so
@@ -109,6 +121,61 @@ def _quote_html(lines: list[str]) -> str:
     )
 
 
+def _image_html(alt: str, rel: str, base_dir: str, embed: bool) -> str:
+    """A figure, bounded to the panel width and captioned underneath.
+
+    `base_dir` is the experiment folder the stored path is relative to. With
+    `embed`, the file is inlined as a ``data:`` URI (HTML export, which
+    promises a single self-contained file); otherwise it is referenced as a
+    ``file:`` URL and wrapped in a link, so clicking opens it full size.
+
+    A figure whose file has gone missing renders as a visible placeholder
+    rather than a broken box -- a lab record should say what it lost.
+    """
+    path = os.path.join(base_dir, rel) if base_dir else rel
+    caption = _inline(alt) if alt else ""
+
+    if not os.path.isfile(path):
+        return (
+            f'<p style="color:{S.MUTED}; font-style:italic; margin:{S.px(4)}px 0;">'
+            f"[missing figure: {html.escape(rel)}]</p>"
+        )
+
+    url = QtCore.QUrl.fromLocalFile(os.path.abspath(path)).toString()
+    if embed:
+        source = ri.data_uri(path)
+        if not source:
+            return (
+                f'<p style="color:{S.MUTED}; font-style:italic; margin:{S.px(4)}px 0;">'
+                f"[unreadable figure: {html.escape(rel)}]</p>"
+            )
+    else:
+        source = url
+
+    natural = QtGui.QImageReader(path).size()
+    cap = S.px(IMAGE_DISPLAY_PX)
+    width = min(natural.width(), cap) if natural.isValid() and natural.width() > 0 else cap
+
+    img = (
+        f'<img src="{html.escape(source, quote=True)}" width="{width}" '
+        f'alt="{html.escape(alt, quote=True)}">'
+    )
+    if not embed:
+        img = f'<a href="{html.escape(url, quote=True)}">{img}</a>'
+
+    body = img
+    if caption:
+        body += (
+            f'<div style="color:{S.MUTED}; font-size:{S.px(11)}px; '
+            f'margin-top:{S.px(3)}px;">{caption}</div>'
+        )
+    return (
+        f'<table cellspacing="0" cellpadding="6" style="margin:{S.px(4)}px 0;"><tr>'
+        f'<td style="background-color:{S.ALT_ROW_BG}; border:1px solid {S.BORDER};">'
+        f"{body}</td></tr></table>"
+    )
+
+
 def _split_row(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
@@ -138,14 +205,19 @@ def _table_html(rows: list[list[str]]) -> str:
     return "".join(out)
 
 
-def to_html(markdown: str) -> str:
+def to_html(markdown: str, *, base_dir: str = "", embed_images: bool = False) -> str:
     """Render `markdown` to a themed HTML document for a ``QTextBrowser``.
 
     Handles exactly what :mod:`report_builder` emits: HTML comments (dropped),
-    ATX headings, ``---`` rules, fenced code, pipe tables, ``>`` quotes, and
-    paragraphs with inline code/bold/italic. Anything else falls through as a
-    paragraph rather than being lost -- a lab record should never silently
-    drop a line it did not recognise.
+    ATX headings, ``---`` rules, fenced code, pipe tables, ``>`` quotes,
+    ``![](...)`` figures, and paragraphs with inline code/bold/italic. Anything
+    else falls through as a paragraph rather than being lost -- a lab record
+    should never silently drop a line it did not recognise.
+
+    `base_dir` is the experiment folder that figure paths are relative to;
+    without it images are looked up relative to the process's own directory,
+    which is why every real caller passes it. `embed_images` inlines them as
+    ``data:`` URIs for a self-contained HTML export.
     """
     parts: list[str] = []
     lines = (markdown or "").splitlines()
@@ -193,6 +265,14 @@ def to_html(markdown: str) -> str:
             i += 1
             continue
 
+        image = ri.IMAGE_MD.match(line.strip())
+        if image:
+            parts.append(
+                _image_html(image.group(1), image.group(2), base_dir, embed_images)
+            )
+            i += 1
+            continue
+
         if line.lstrip().startswith("|"):
             rows: list[list[str]] = []
             while i < len(lines) and lines[i].lstrip().startswith("|"):
@@ -235,5 +315,6 @@ def _is_block_start(line: str) -> bool:
         or stripped in ("---", "***", "___")
         or stripped.startswith("|")
         or stripped.startswith(">")
+        or ri.IMAGE_MD.match(stripped)
         or _COMMENT_OPEN.match(line)
     )

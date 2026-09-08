@@ -32,6 +32,7 @@ from PyQt5 import QtWidgets
 
 from . import config
 from . import report_builder
+from . import report_images as ri
 from . import report_render
 from . import report_store as rs
 from . import style as S
@@ -74,11 +75,17 @@ class ReportDockWidget(QtWidgets.QDockWidget):
 
         self._view = QtWidgets.QTextBrowser()
         self._view.setOpenExternalLinks(False)
+        # Figures are wrapped in a link to their own file so a click opens them
+        # full size. `setOpenLinks(False)` is what stops QTextBrowser from
+        # instead *navigating* to that file and replacing the whole report with
+        # it, which is its default and has no back button here.
+        self._view.setOpenLinks(False)
+        self._view.anchorClicked.connect(self._on_anchor)
         self._view.setPlaceholderText(
             "The experiment report builds itself as you run plans.\n\n"
             "Run notes from the plan form land here automatically. Use the "
-            "buttons below to add a note, a section heading, or a snapshot of "
-            "live beamline readings."
+            "buttons below to add a note, a figure, a section heading, or a "
+            "snapshot of live beamline readings."
         )
         layout.addWidget(self._view, 1)
 
@@ -92,6 +99,7 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         )
         self._snapshot_btn.setEnabled(False)
         buttons.addWidget(self._snapshot_btn)
+        buttons.addWidget(self._image_button())
         buttons.addWidget(self._button("✎ Note", "Add a free note at this point in the report.", self._on_note))
         buttons.addWidget(
             self._button("§ Heading", "Start a new titled section in the report.", self._on_heading)
@@ -116,6 +124,33 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         btn = QtWidgets.QPushButton(text)
         btn.setToolTip(tip)
         btn.clicked.connect(slot)
+        return btn
+
+    def _image_button(self) -> QtWidgets.QPushButton:
+        """The figure button: a menu, because there are two ways to get pixels.
+
+        Pasting is listed first and bound to Ctrl+V because it is the path that
+        works everywhere -- the user grabs a region with their own OS shortcut
+        and the clipboard carries it here, with no screen-capture permission
+        for B-PILOT to be denied and nothing to break under Wayland.
+        """
+        btn = QtWidgets.QPushButton("🖼 Figure")
+        btn.setToolTip(
+            "Add a figure to the report.\n"
+            "Take a screenshot with your usual shortcut, then paste it here."
+        )
+        menu = QtWidgets.QMenu(btn)
+        paste = menu.addAction("Paste from clipboard\tCtrl+V")
+        paste.triggered.connect(self._on_paste_image)
+        attach = menu.addAction("Attach image file…")
+        attach.triggered.connect(self._on_attach_image)
+        btn.setMenu(menu)
+
+        # Scoped to the dock so it cannot steal Ctrl+V from the console or any
+        # text field elsewhere in the window.
+        shortcut = QtWidgets.QShortcut(QtGui.QKeySequence.Paste, self)
+        shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        shortcut.activated.connect(self._on_paste_image)
         return btn
 
     def _build_title_bar(self) -> QtWidgets.QWidget:
@@ -238,8 +273,21 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         bar = self._view.verticalScrollBar()
         at_end = self._follow.isChecked()
         previous = bar.value()
-        self._view.setHtml(report_render.to_html(markdown))
+        self._view.setHtml(
+            report_render.to_html(markdown, base_dir=self._base_dir())
+        )
         bar.setValue(bar.maximum() if at_end else min(previous, bar.maximum()))
+
+    def _base_dir(self) -> str:
+        """Experiment folder that stored figure paths are relative to."""
+        if not (self._beamline and self._experiment):
+            return ""
+        return ri.base_dir(self._beamline, self._experiment)
+
+    def _on_anchor(self, url: QtCore.QUrl) -> None:
+        """Open a clicked figure full size in the desktop's image viewer."""
+        if url.isLocalFile():
+            QtGui.QDesktopServices.openUrl(url)
 
     # -------------------------------------------------------------- actions --
 
@@ -315,8 +363,73 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         )
         self.refresh()
 
+    def _on_paste_image(self) -> None:
+        if not self._require_experiment():
+            return
+        image = ri.from_clipboard()
+        if image is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Nothing to paste",
+                "There is no image on the clipboard.\n\n"
+                "Take a screenshot with your usual shortcut first — on macOS "
+                "⌘⇧⌃4 copies a region, and on Linux `gnome-screenshot -a -c` "
+                "or your desktop's area-capture shortcut does the same.",
+            )
+            return
+        self._add_image(image)
+
+    def _on_attach_image(self) -> None:
+        if not self._require_experiment():
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Attach image", os.path.expanduser("~"), ri.IMAGE_FILTER
+        )
+        if not path:
+            return
+        image = ri.load_file(path)
+        if image is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Not an image", f"Could not read an image from:\n{path}"
+            )
+            return
+        self._add_image(image)
+
+    def _add_image(self, image) -> None:
+        """Caption, store, record. Asking first means a cancel leaves no file."""
+        caption, ok = QtWidgets.QInputDialog.getText(
+            self, "Add figure", "Caption (optional):"
+        )
+        if not ok:
+            return
+        stored = ri.store_image(self._beamline, self._experiment, image)
+        if stored is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Figure not saved",
+                "The image could not be written into the experiment folder:\n"
+                + ri.figures_dir(self._beamline, self._experiment),
+            )
+            return
+        rs.append_event(
+            self._beamline,
+            self._experiment,
+            rs.IMAGE,
+            title=caption.strip(),
+            **stored,
+        )
+        self.refresh()
+
     def _on_export(self) -> None:
-        """Save a standalone copy -- Markdown, or self-contained HTML."""
+        """Save a standalone copy -- Markdown, or self-contained HTML.
+
+        "Standalone" has to hold for figures too. HTML inlines them as
+        ``data:`` URIs, so the export stays one file. Markdown cannot inline
+        anything, so the figures are copied into a ``<name>_figures/`` folder
+        beside the ``.md`` and the links rewritten -- otherwise the export
+        would point back into the live session directory and break the moment
+        it was mailed to anyone.
+        """
         if not self._require_experiment():
             return
         default = os.path.join(
@@ -329,19 +442,26 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         if not path:
             return
         markdown = self._markdown()
+        base = self._base_dir()
         wants_html = selected.startswith("HTML") or path.lower().endswith(".html")
         if wants_html and not path.lower().endswith(".html"):
             path += ".html"
         try:
-            with open(path, "w", encoding="utf-8") as fh:
-                if wants_html:
+            if wants_html:
+                body = report_render.to_html(markdown, base_dir=base, embed_images=True)
+                with open(path, "w", encoding="utf-8") as fh:
                     fh.write(
                         "<!doctype html><meta charset='utf-8'>"
                         f"<title>{self._experiment}</title>"
                         f"<body style='background:{S.PANEL}; margin:24px; "
-                        f"font-family:sans-serif;'>{report_render.to_html(markdown)}</body>"
+                        f"font-family:sans-serif;'>{body}</body>"
                     )
-                else:
+            else:
+                # Copy the figures first: if that fails the links stay pointing
+                # at the originals, which is recoverable, whereas writing the
+                # .md first and failing here would leave a half-made export.
+                markdown = ri.package_markdown(markdown, base, path)
+                with open(path, "w", encoding="utf-8") as fh:
                     fh.write(markdown)
         except OSError as exc:
             QtWidgets.QMessageBox.warning(self, "Export failed", str(exc))
