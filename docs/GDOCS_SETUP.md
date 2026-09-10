@@ -56,10 +56,20 @@ conda environment are what broke the GUI launch there once before.
 
 1. Go to <https://console.cloud.google.com/> and create a project (any name).
 2. **APIs & Services → Library** → enable **Google Drive API**.
-3. **APIs & Services → OAuth consent screen** → External → fill in the required
-   fields → add your own Google account under **Test users**. You do not need
-   to publish or verify the app; a test user can authorise it indefinitely for
-   this scope.
+3. **Google Auth Platform → Audience** (older consoles: **APIs & Services →
+   OAuth consent screen**) → **External** → fill in the required fields.
+   **Under "Test users", add the exact Google address you will sign in with.**
+   Skipping this is the most common setup failure: consent is refused with
+   *"has not completed the Google verification process… can only be accessed by
+   developer-approved testers"*, before B-PILOT is involved at all.
+   - While publishing status is **Testing**, Google expires refresh tokens after
+     **7 days**, so you will have to press Connect again about weekly. It fails
+     visibly (the status chip says to reconnect), not silently.
+   - To avoid that, set publishing status to **In production**. `drive.file` is
+     a narrow per-file scope and generally does not require the verification
+     review broader Drive scopes do, so this usually takes effect immediately.
+     If the console asks you to submit for verification instead, stay in
+     Testing.
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID** →
    application type **Desktop app**.
 5. Download the JSON. Keep it somewhere private, e.g.
@@ -130,9 +140,17 @@ import. The status line shows the actual import error.
 B-PILOT starts — a variable set afterwards is not visible to the running
 process.
 
+**Consent is refused: "can only be accessed by developer-approved testers".**
+Your account is not in **Test users** for the project (step 2.3), or the browser
+signed you in as a *different* Google account than the one you added. Add the
+exact address, and pick it deliberately in the account chooser — do the Connect
+in a private window if the chooser is being skipped.
+
 **"Not connected to Google — reconnect in Configuration".** The stored token
-could not be refreshed: it was revoked, the machine is offline, or the clock is
-badly skewed. Press Connect again.
+could not be refreshed: it was revoked, the machine is offline, the clock is
+badly skewed — or, most often, the app is in **Testing** publishing status and
+Google expired the refresh token after 7 days. Press Connect again, or move the
+app to production (step 2.3).
 
 **The document is not updating.** Check the status chip beside the Share
 button. Remember the 30-second floor, and that an unchanged report makes no
