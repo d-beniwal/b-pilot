@@ -335,9 +335,22 @@ KERNEL_CWD_DEFAULT = BLUESKY_ROOT
 
 # ── Runtime state (per-user, NOT part of the repo) ───────────────────────────
 # Kernel connection files, the plan queue, and transcripts.  Home-based so it is
-# writable and per-user on shared beamline workstations; overridable via the
-# ``session_dir`` config key.
-SESSION_DIR_DEFAULT = os.path.expanduser("~/.bluesky_pilot")
+# writable and per-user on shared beamline workstations.
+#
+# This is now PINNED: it used to be overridable through a ``session_dir`` config
+# key, and that key is what let a profile relocate its kernel/queue/history into
+# a macOS temp dir -- which the OS then purges, and which silently orphaned the
+# fixed ``~/.bluesky_pilot/<beamline>/kernel.json`` attach path the README
+# documents.  ``config.py`` now forces this value for every profile, existing
+# and new (see its ``_PINNED_KEYS``).
+#
+# ``BPILOT_SESSION_DIR`` is the one remaining escape hatch, for a test harness
+# that needs an isolated tree.  Deliberately environment-only and process-local:
+# unlike a config key it cannot be persisted into a profile, so it can never
+# become a permanent, invisible relocation the way ``session_dir`` did.
+SESSION_DIR_DEFAULT = os.path.expanduser(
+    os.environ.get("BPILOT_SESSION_DIR") or "~/.bluesky_pilot"
+)
 
 
 def ensure_on_syspath() -> None:

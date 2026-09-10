@@ -514,11 +514,19 @@ class ConfigDialog(QtWidgets.QDialog):
         grid = QtWidgets.QGridLayout()
         grid.setColumnStretch(1, 1)
 
+        # Read-only: the beamline id is DERIVED from the profile folder name
+        # (config._PINNED_KEYS), not configured. It used to be a free-text box,
+        # and editing it silently re-pointed the kernel connection file, the
+        # queue and the transcript at a different ~/.bluesky_pilot/<id>/ tree.
         self._beamline = QtWidgets.QLineEdit()
+        self._beamline.setReadOnly(True)
         self._beamline.setToolTip(
-            "Identifies the single interactive kernel for this beamline "
-            "(screen session name + fixed connection-file path) and the "
-            "device catalog used by this profile."
+            "The profile folder name. Identifies the single interactive kernel "
+            "for this beamline (screen session name + fixed connection file at "
+            "~/.bluesky_pilot/<beamline>/kernel.json) and the device catalog "
+            "used by this profile.\n\n"
+            "Not editable: to use a different id, create a new profile with "
+            "that name."
         )
         grid.addWidget(S.LabelRight("Beamline id:"), 0, 0)
         grid.addWidget(self._beamline, 0, 1)
@@ -1727,7 +1735,8 @@ class ConfigDialog(QtWidgets.QDialog):
             "bluesky_startup": self._startup.toPlainText().strip(),
             "send_import_line": self._send_import.isChecked(),
             "keep_kernel_on_exit": self._keep_kernel.isChecked(),
-            "beamline": self._beamline.text().strip(),
+            # "beamline" deliberately absent -- derived from the profile folder
+            # name by config._apply_pinned(), so the widget never writes it back.
             "use_screen": self._use_screen.isChecked(),
             "embedded_starter_script": self._embedded_starter.text().strip(),
             "theme": self._theme.currentData(),
