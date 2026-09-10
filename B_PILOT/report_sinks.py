@@ -357,6 +357,7 @@ def _tz_offset_s() -> int:
 # ── selection ────────────────────────────────────────────────────────────────
 
 _SINKS: dict = {}
+_gdocs_reason = "not checked yet"
 
 
 def _register_builtin() -> None:
@@ -367,12 +368,22 @@ def _register_builtin() -> None:
     # pinned beamline environment, and B-PILOT must run everywhere they are
     # absent. A guarded import here (the `autopilot_bridge` pattern) means the
     # backend is simply not offered rather than the app failing to start.
+    #
+    # The module always imports; it is `available()` that reports whether the
+    # libraries did. That split is what lets the Configuration page say *why*
+    # the backend is missing instead of silently omitting it.
+    global _gdocs_reason
     if "gdocs" not in _SINKS:
         try:
-            from .report_gdocs import GDocsSink
-        except Exception:  # noqa: BLE001 -- missing deps, or a broken install
+            from . import report_gdocs
+        except Exception as exc:  # noqa: BLE001 -- a broken install
+            _gdocs_reason = f"{type(exc).__name__}: {exc}"
             return
-        _SINKS[GDocsSink.name] = GDocsSink
+        if not report_gdocs.available():
+            _gdocs_reason = report_gdocs.MISSING_REASON
+            return
+        _gdocs_reason = ""
+        _SINKS[report_gdocs.GDocsSink.name] = report_gdocs.GDocsSink
 
 
 def available() -> list:
@@ -398,3 +409,16 @@ def get_sink(name: str | None = None) -> Sink:
     """Construct the named sink (default: the configured one)."""
     _register_builtin()
     return _SINKS[name or backend_name()]()
+
+
+def unavailable_reason(name: str) -> str:
+    """Why `name` is not in :func:`available`, for the Configuration page.
+
+    An empty string means it *is* available (or that nothing is known about
+    the name). Users who switch the backend and find nothing happens deserve
+    the actual import error, not silence.
+    """
+    _register_builtin()
+    if name in _SINKS:
+        return ""
+    return _gdocs_reason if name == "gdocs" else f"unknown backend {name!r}"

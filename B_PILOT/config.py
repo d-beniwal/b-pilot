@@ -223,10 +223,23 @@ DEFAULTS: dict = {
     # experiment from the Report panel; sharing is per experiment, never
     # per profile.
     "report_sync_enabled": False,
+    # Where the mirror publishes to: "http" (the report_server/ service in this
+    # repo) or "gdocs" (a Google Doc shared read-only by link, see
+    # B_PILOT/report_gdocs.py). The HTTP service is the only genuinely *live*
+    # target and the only one where hiding an entry takes its figures offline
+    # instantly; Google Docs needs no hosting at all, which is the whole reason
+    # it exists. An unavailable backend (the Google client libraries are not in
+    # the pinned beamline environment) falls back to "http" rather than
+    # erroring, so a profile naming it stays harmless on a machine without it.
+    "report_sync_backend": "http",
     # Base URL of the viewer service, e.g. "https://reports.inside.anl.gov".
     # A beamline fact like qs_zmq_control_addr, so it belongs in the committed
-    # profile -- unlike the push token, which never does.
+    # profile -- unlike the push token, which never does. Unused by "gdocs".
     "report_sync_url": "",
+    # Optional Drive folder id to create report documents in ("gdocs" only).
+    # Blank means the account's My Drive root. Not a secret -- a folder id is
+    # useless without access to the folder -- so the profile is the right home.
+    "report_gdocs_folder_id": "",
     # Longest the remote copy may lag the local record, in seconds. One number
     # does for the whole debounce: it is the ceiling that stops a plan
     # streaming output into history.jsonl from starving the push, and the
