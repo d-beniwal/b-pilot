@@ -77,141 +77,93 @@ Structurally this mirrors :mod:`qs_client`: a lazy module-level singleton, one
 ``threading.Thread(daemon=True)``, a ``queue.Queue`` inbox, a lock around all
 shared state, and errors that are *recorded and surfaced* rather than
 swallowed -- the lesson of the ``item_add`` bug where a rejected call looked
-exactly like a successful one. Unlike ``qs_client`` this module imports no Qt,
-so it stays unit-testable without a display and the "never even imported when
-switched off" property is easy to prove.
+exactly like a successful one. Nothing here touches the GUI thread or any
+widget, so the whole module is driveable from a test with ``start=False``.
+
+**Where it publishes to lives in :mod:`report_sinks`.** This module owns *when*
+-- the poll, the debounce, the digest short-circuit, the backoff, the status --
+and delegates *where* to a sink chosen by ``report_sync_backend``. The four
+outcome constants are the seam; see that module's docstring. A second target
+(Google Docs) exists because publishing the HTTP service needs a host, TLS and
+egress that a beamline may not have, and it trades live updates and the
+instant-hide guarantee for needing no hosting at all.
+
+One caveat on "no Qt": :mod:`report_images`, imported here to resolve figure
+paths, imports PyQt5, so this module is not importable in a bare interpreter
+even though nothing in it touches a widget. :mod:`report_builder` and
+:mod:`report_store` *are* genuinely Qt-free, which is what lets the document be
+rendered off the GUI thread.
 """
 from __future__ import annotations
 
-import gzip
 import hashlib
-import json
-import os
 import queue as _queue
-import ssl
 import threading
 import time
-import urllib.error
-import urllib.request
 
 from . import config
 from . import report_builder
 from . import report_images as ri
+from . import report_sinks as sinks
 from . import report_store as rs
 from . import report_views
+from .report_sinks import AUTH as _AUTH
+from .report_sinks import MAX_DOC_BYTES
+from .report_sinks import MAX_FIGURE_BYTES
+from .report_sinks import OK as _OK
+from .report_sinks import REVOKED as _REVOKED
+from .report_sinks import TRANSIENT as _TRANSIENT
 
-SCHEMA = 1
-
-TOKEN_ENV = "BPILOT_REPORT_SYNC_TOKEN"
-CAFILE_ENV = "BPILOT_REPORT_SYNC_CAFILE"
+# Re-exported, not redefined: ``config_dialog`` and ``report_panel`` both name
+# ``report_sync.TOKEN_ENV`` / ``push_token()`` / ``service_url()`` when telling
+# the user which arming condition is missing, and those call sites should not
+# have to know that the transport moved into :mod:`report_sinks`.
+SCHEMA = sinks.SCHEMA
+TOKEN_ENV = sinks.TOKEN_ENV
+CAFILE_ENV = sinks.CAFILE_ENV
+push_token = sinks.push_token
+service_url = sinks.service_url
 
 _TICK_S = 2.0            # worker wake interval when nothing is queued
 _QUIET_S = 2.0           # trailing debounce: collapse a burst of edits into one push
-_DOC_TIMEOUT_S = 20.0
-_FIG_TIMEOUT_S = 60.0
 _BACKOFF_S = (5, 10, 20, 40, 60)
 _AUTH_BACKOFF_S = 300.0  # a bad token is not transient -- do not hammer it
 
-# Client-side caps, mirroring the service's. A runaway kernel error loop can
-# append tracebacks indefinitely; better to refuse locally, visibly, than to
-# fill someone's VM.
-MAX_DOC_BYTES = 5_000_000
-MAX_FIGURE_BYTES = 8_000_000
-
-# Outcome classes for one HTTP attempt.
-_OK = "ok"
-_AUTH = "auth"
-_REVOKED = "revoked"
-_TRANSIENT = "transient"
-
-
 # ── configuration gate ───────────────────────────────────────────────────────
 
-def push_token() -> str:
-    return (os.environ.get(TOKEN_ENV) or "").strip()
-
-
-def service_url() -> str:
-    return (config.get("report_sync_url") or "").strip().rstrip("/")
-
-
 def enabled() -> bool:
-    """Whether sync is armed on *this machine*: profile flag + URL + push token.
+    """Whether sync is armed on *this machine*, per the configured backend.
 
-    All three, deliberately -- see the module docstring on why the committed
-    profile flag alone would arm checkouts that never opted in.
+    Delegated to the sink because the conditions differ by target: the HTTP
+    service needs a URL and a push token, while Google Docs needs client
+    credentials and a connected account. What does *not* differ is that at
+    least one of them always lives in the environment rather than the profile
+    -- see the module docstring on why the committed flag alone must never be
+    enough to arm a checkout.
     """
-    return bool(config.get("report_sync_enabled") and service_url() and push_token())
+    return sinks.get_sink().enabled()
 
 
-def max_staleness_s() -> float:
-    """Longest the remote is allowed to lag, from ``report_sync_interval_s``.
+def max_staleness_s(sink: sinks.Sink | None = None) -> float:
+    """Longest the remote is allowed to lag, in seconds.
 
     One number does for both halves of the debounce: it is the ceiling that
     stops a continuously-growing ``history.jsonl`` (a long scan streaming
     output) from starving the push forever, and the quiet period is derived
     from it rather than being a second knob to get wrong.
+
+    Floored by the sink. A target where every write costs a document
+    conversion and a permanent revision-history entry cannot be written every
+    five seconds, and that constraint belongs to the target rather than to a
+    config key the user has to know to raise. `sink` is passed explicitly by
+    the worker so it uses the sink it is actually publishing through, not
+    whatever the config names right now.
     """
     try:
-        return max(2.0, float(config.get("report_sync_interval_s") or 5))
+        want = max(2.0, float(config.get("report_sync_interval_s") or 5))
     except (TypeError, ValueError):
-        return 5.0
-
-
-# ── HTTP (background thread only) ────────────────────────────────────────────
-
-def _ssl_context() -> ssl.SSLContext:
-    """Default verification, optionally against a private CA.
-
-    An APS-internal VM with a self-signed certificate is the likely real snag
-    here. The answer is a CA file, from the environment alongside the push
-    token -- deliberately *not* a "skip verification" config key, which would
-    be a permanent hole added to dodge a one-time setup problem.
-    """
-    return ssl.create_default_context(cafile=os.environ.get(CAFILE_ENV) or None)
-
-
-def _classify(code: int) -> str:
-    if 200 <= code < 300:
-        return _OK
-    if code in (401, 403):
-        return _AUTH
-    if code in (404, 410):
-        return _REVOKED
-    return _TRANSIENT
-
-
-def _request(
-    method: str,
-    url: str,
-    *,
-    body: bytes | None = None,
-    headers: dict | None = None,
-    timeout: float,
-) -> tuple[str, str, bytes]:
-    """One HTTP attempt. Returns ``(outcome, message, payload)``; never raises.
-
-    ``timeout`` is always passed: ``urlopen`` defaults to *no* timeout, and a
-    hung socket would wedge this daemon thread silently and forever -- the same
-    shape as the queueserver GUI-freeze incident, just moved off the GUI thread.
-    """
-    req = urllib.request.Request(url, data=body, method=method)
-    for key, value in (headers or {}).items():
-        req.add_header(key, value)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
-            return _OK, "", resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = (exc.read() or b"")[:200].decode("utf-8", "replace").strip()
-        except Exception:  # noqa: BLE001
-            pass
-        return _classify(exc.code), f"HTTP {exc.code}{': ' + detail if detail else ''}", b""
-    except urllib.error.URLError as exc:
-        return _TRANSIENT, f"{exc.reason}", b""
-    except Exception as exc:  # noqa: BLE001 -- socket timeouts, TLS errors, bad URLs
-        return _TRANSIENT, f"{type(exc).__name__}: {exc}", b""
+        want = 5.0
+    return max(want, (sink or sinks.get_sink()).min_interval_s())
 
 
 # ── the worker ───────────────────────────────────────────────────────────────
@@ -231,6 +183,10 @@ class _Worker:
         # untestable rather than merely awkward.
         self._q: _queue.Queue = _queue.Queue()
         self._lock = threading.Lock()
+
+        # Where this publishes. Rebuilt on `reset` so a backend change in
+        # Configuration takes effect without restarting the GUI.
+        self._sink = sinks.get_sink()
 
         # Subject: pushed in from the GUI thread, never read from config here.
         # config._cache is invalidated on a profile switch and lazily re-read,
@@ -277,7 +233,7 @@ class _Worker:
                 "active": bool(view),
                 "beamline": self._beamline,
                 "experiment": self._experiment,
-                "url": report_views.view_url(service_url(), view),
+                "url": self._sink.url(view),
                 "view_id": (view or {}).get("view_id"),
                 "status": self._status,
                 "pushed_at": self._pushed_at,
@@ -318,8 +274,10 @@ class _Worker:
             self._reset_subject_state()
             self._set_status("idle", None)
         elif kind == "reset":
-            # Configuration changed: the service URL or the exclusions may be
-            # different, so nothing cached about the last push still holds.
+            # Configuration changed: the backend, the service URL or the
+            # exclusions may be different, so nothing cached about the last
+            # push still holds -- and the sink itself may be a different one.
+            self._sink = sinks.get_sink()
             self._reset_subject_state()
         elif kind == "force":
             self._forced = True
@@ -334,14 +292,8 @@ class _Worker:
         view = report_views.get_view(beamline, experiment)
         if not view:
             return
-        outcome, message, _ = _request(
-            "POST",
-            f"{service_url()}/push/{view['view_id']}/revoke",
-            body=b"",
-            headers=self._auth_headers(),
-            timeout=_DOC_TIMEOUT_S,
-        )
-        # A view the service has already forgotten is a successful revoke.
+        outcome, message = self._sink.revoke(view)
+        # A target that has already forgotten this view is a successful revoke.
         if outcome in (_OK, _REVOKED):
             report_views.forget_view(beamline, experiment)
             self._reset_subject_state()
@@ -356,12 +308,19 @@ class _Worker:
             )
 
     def _rotate(self, beamline: str, experiment: str) -> None:
-        if report_views.rotate_view(beamline, experiment) is None:
+        """Forget everything cached about the retired link.
+
+        This deliberately does **not** rotate the view itself. :func:`rotate`
+        already did that on the GUI thread and handed the resulting URL to the
+        user; rotating a second time here would mint a third secret, publish
+        under it, and leave the user holding a link that 404s. That was a real
+        bug -- both call sites used to rotate -- so if a future change moves
+        the rotation back onto the worker, make sure exactly one of them does
+        it and that the caller returns the secret that actually gets pushed.
+        """
+        if report_views.get_view(beamline, experiment) is None:
             return
         self._reset_subject_state()
-
-    def _auth_headers(self) -> dict:
-        return {"Authorization": f"Bearer {push_token()}"}
 
     # ── main loop ────────────────────────────────────────────────────────────
 
@@ -381,7 +340,7 @@ class _Worker:
     def _tick(self) -> None:
         with self._lock:
             beamline, experiment = self._beamline, self._experiment
-        if not (beamline and experiment and enabled()):
+        if not (beamline and experiment and self._sink.enabled()):
             return
         view = report_views.get_view(beamline, experiment)
         if not view:
@@ -411,7 +370,7 @@ class _Worker:
         if not (self._forced or self._dirty_since is not None):
             return
         if not self._forced:
-            ceiling = max_staleness_s()
+            ceiling = max_staleness_s(self._sink)
             quiet = min(_QUIET_S, ceiling / 2.0)
             settled = (now - self._last_change) >= quiet
             overdue = (now - self._dirty_since) >= ceiling
@@ -449,7 +408,10 @@ class _Worker:
     def _push(self, beamline: str, experiment: str, view: dict) -> None:
         markdown, digest, figures, manifest = self._build(beamline, experiment)
 
-        pending = [f for f in figures if (view["view_id"], f) not in self._uploaded]
+        # A target that carries its pixels inside the document (Google Docs
+        # embeds them as data: URIs) has no separate figure phase at all.
+        uploads = figures if self._sink.wants_figures() else []
+        pending = [f for f in uploads if (view["view_id"], f) not in self._uploaded]
         if digest == self._digest and not pending and not self._forced:
             # Nothing the reader would see has changed. This is the common case
             # while a plan streams output into history.jsonl: the bytes move,
@@ -463,46 +425,26 @@ class _Worker:
 
         self._set_status("pushing", self._error)
 
-        if view["view_id"] not in self._indexed:
+        if uploads and view["view_id"] not in self._indexed:
             self._index_figures(view)
-            pending = [f for f in figures if (view["view_id"], f) not in self._uploaded]
+            pending = [f for f in uploads if (view["view_id"], f) not in self._uploaded]
 
-        # Figures first: a document that references an image the service cannot
+        # Figures first: a document that references an image the target cannot
         # serve would render broken for every reader until the next cycle.
         for rel in pending:
             if not self._push_figure(beamline, experiment, view, rel):
                 return
 
-        envelope = {
-            "schema": SCHEMA,
-            "view_id": view["view_id"],
-            "secret": view["secret"],
-            "beamline": beamline,
-            "experiment": experiment,
-            "title": config.get("report_title") or "",
-            "generated_at": time.time(),
-            # render_markdown bakes beamline-local times with no marker, so an
-            # off-site reader would silently misread every timestamp. The page
-            # labels them with this rather than the document being rewritten.
-            "tz": time.strftime("%Z"),
-            "tz_offset_s": -(time.altzone if time.daylight and time.localtime().tm_isdst else time.timezone),
-            "sha256": digest,
-            "markdown": markdown,
-            "figures": figures,
-            "manifest": manifest,
-        }
-        body = gzip.compress(json.dumps(envelope).encode("utf-8"))
-        outcome, message, _ = _request(
-            "POST",
-            f"{service_url()}/push/{view['view_id']}",
-            body=body,
-            headers={
-                **self._auth_headers(),
-                "Content-Type": "application/json",
-                "Content-Encoding": "gzip",
-            },
-            timeout=_DOC_TIMEOUT_S,
+        doc = sinks.Document(
+            beamline=beamline,
+            experiment=experiment,
+            markdown=markdown,
+            digest=digest,
+            figures=figures,
+            manifest=manifest,
+            title=config.get("report_title") or "",
         )
+        outcome, message = self._sink.push_doc(view, doc)
         if outcome == _OK:
             self._digest = digest
             self._dirty_since = None
@@ -531,42 +473,20 @@ class _Worker:
             self._set_status("pushing", f"skipped an oversize figure ({rel})")
             return True
 
-        name = os.path.basename(rel)
-        outcome, message, _ = _request(
-            "POST",
-            f"{service_url()}/push/{view['view_id']}/figures/{name}",
-            body=blob,
-            headers={
-                **self._auth_headers(),
-                "Content-Type": "application/octet-stream",
-                "X-Content-Sha256": hashlib.sha256(blob).hexdigest(),
-            },
-            timeout=_FIG_TIMEOUT_S,
-        )
+        outcome, message = self._sink.push_figure(view, rel, blob)
         if outcome == _OK:
             self._uploaded[(view["view_id"], rel)] = hashlib.sha256(blob).hexdigest()
             return True
-        self._fail(f"figure {name}: {message}", outcome)
+        self._fail(message, outcome)
         return False
 
     def _index_figures(self, view: dict) -> None:
-        """Learn what the service already holds, so a restart re-uploads nothing."""
-        outcome, _, payload = _request(
-            "GET",
-            f"{service_url()}/push/{view['view_id']}/figures",
-            headers=self._auth_headers(),
-            timeout=_DOC_TIMEOUT_S,
-        )
-        if outcome != _OK:
-            return  # best effort; worst case we re-upload
-        try:
-            known = json.loads(payload.decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            return
-        for item in known if isinstance(known, list) else []:
-            name = (item or {}).get("name")
-            if name:
-                self._uploaded[(view["view_id"], f"figures/{name}")] = item.get("sha256", "")
+        """Learn what the target already holds, so a restart re-uploads nothing."""
+        known = self._sink.known_figures(view)
+        if known is None:
+            return  # the listing failed; ask again next cycle
+        for rel, digest in known.items():
+            self._uploaded[(view["view_id"], rel)] = digest
         self._indexed.add(view["view_id"])
 
     def _fail(self, message: str, outcome: str = _TRANSIENT) -> None:
@@ -690,12 +610,28 @@ def share(beamline: str, experiment: str) -> str:
     Mints the view if there isn't one and forces an immediate push, so the link
     is live rather than blank by the time the user has pasted it somewhere.
     """
+    sink = sinks.get_sink()
     view = report_views.ensure_view(beamline, experiment)
+
+    # Some targets must exist before they can be written to: the HTTP service
+    # creates the view on first push, but a Google Doc has to be created and
+    # shared before it has a URL to hand back. Done here, on the GUI thread,
+    # rather than in the worker -- the user pressed a button and is waiting for
+    # a link, so a failure belongs in front of them, not in a status chip.
+    extra = {}
+    if enabled():
+        try:
+            extra = sink.prepare_share(beamline, experiment, view) or {}
+        except Exception:  # noqa: BLE001 -- a sink must not, but never trust it
+            extra = {}
+    if extra:
+        view = report_views.update_view(beamline, experiment, extra) or view
+
     if enabled():
         worker = _get_worker()
         worker.post("subject", (beamline, experiment))
         worker.post("force", None)
-    return report_views.view_url(service_url(), view)
+    return sink.url(view)
 
 
 def stop_sharing(beamline: str, experiment: str) -> None:
@@ -712,17 +648,39 @@ def stop_sharing(beamline: str, experiment: str) -> None:
 
 
 def rotate(beamline: str, experiment: str) -> str:
-    """Retire the current link and mint a new one for the same experiment."""
+    """Retire the current link and mint a new one for the same experiment.
+
+    What "a new link" *is* depends on the target, and the panel's wording has
+    to match: the HTTP service keeps one stored document and mints a new
+    secret for it, while a Google Doc's URL is its file id, so the only way to
+    kill a link is to publish into a new document and un-share the old one.
+    """
+    sink = sinks.get_sink()
     view = report_views.rotate_view(beamline, experiment)
+    if view is None:
+        return ""
+
+    # Same reasoning as :func:`share`: whatever the target needs doing happens
+    # here, synchronously, so the URL returned is the one that will actually be
+    # published. The worker is only told to forget its cache.
+    extra = {}
+    if enabled():
+        try:
+            extra = sink.rotate_target(beamline, experiment, view) or {}
+        except Exception:  # noqa: BLE001 -- a sink must not, but never trust it
+            extra = {}
+    if extra:
+        view = report_views.update_view(beamline, experiment, extra) or view
+
     if enabled():
         worker = _get_worker()
         worker.post("rotate", (beamline, experiment))
         worker.post("force", None)
-    return report_views.view_url(service_url(), view)
+    return sink.url(view)
 
 
 def view_url(beamline: str, experiment: str) -> str:
-    return report_views.view_url(service_url(), report_views.get_view(beamline, experiment))
+    return sinks.get_sink().url(report_views.get_view(beamline, experiment))
 
 
 def reset() -> None:

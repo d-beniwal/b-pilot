@@ -157,6 +157,32 @@ def ensure_view(beamline: str, experiment: str) -> dict:
     return _mutate(beamline, _do)
 
 
+def update_view(beamline: str, experiment: str, fields: dict) -> dict | None:
+    """Merge `fields` into this experiment's view. Returns the updated record.
+
+    For target-specific state a sink has to remember -- the Google backend's
+    document id, so that :meth:`Sink.url` can answer without a network call and
+    the next push updates the same document rather than creating another one.
+
+    Deliberately a merge rather than a replace, and deliberately refusing to
+    touch ``view_id``/``secret``: those are minted here and a sink overwriting
+    one would break the link the user is already holding.
+    """
+    protected = {"view_id", "secret"}
+    payload = {k: v for k, v in (fields or {}).items() if k not in protected}
+    if not payload:
+        return get_view(beamline, experiment)
+
+    def _do(data: dict) -> dict | None:
+        view = data["views"].get(_key(experiment))
+        if not isinstance(view, dict):
+            return None
+        view.update(payload)
+        return dict(view)
+
+    return _mutate(beamline, _do)
+
+
 def rotate_view(beamline: str, experiment: str) -> dict | None:
     """Mint a new secret, keeping ``view_id``. Returns the new view, or ``None``.
 
