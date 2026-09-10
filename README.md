@@ -29,13 +29,19 @@ time.
 - **Run controls** — pause/resume/stop/abort the RunEngine from the toolbar
   without switching to a terminal.
 - **Data viewer** — browse runs from a `databroker` catalog.
-- **Remote report mirror** *(optional)* — publish a live, read-only copy of an
-  experiment report so collaborators off-site can follow it as it happens.
-  B-PILOT only ever pushes *outward* to a small service you host
-  (`report_server/`); the workstation opens no port, and the viewer's routes are
-  GET-only, so a remote reader has no access to the workstation or the
-  instrument. Off by default, per-experiment opt-in, and it additionally
-  requires a push token in the environment — see `report_server/README.md`.
+- **Remote report mirror** *(optional)* — publish a read-only copy of an
+  experiment report so collaborators off-site can follow it. B-PILOT only ever
+  pushes *outward*; the workstation opens no port, so a remote reader has no
+  access to it or to the instrument. Off by default and per-experiment opt-in,
+  and it additionally requires a credential in the environment. Two targets,
+  chosen in Configuration → Reports:
+  - **a viewer service you host** (`report_server/`) — genuinely live, and
+    hiding an entry takes its figures offline instantly. Needs a host and TLS;
+    see `report_server/README.md`.
+  - **a Google Doc** — no hosting at all, but readers refresh rather than watch,
+    updates are held to one every 30 s, Drive keeps earlier revisions of what
+    was published, and figures are not carried over yet; see
+    `docs/GDOCS_SETUP.md`.
 - **Configurable plan scope** — a Configuration dialog controls which
   directory is scanned for plans, which files are even shown in the file
   browser ("Plan visibility," with select-all/deselect-all), and what startup

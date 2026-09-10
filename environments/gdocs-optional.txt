@@ -1,0 +1,16 @@
+# OPTIONAL -- only for the Google Docs report backend (B_PILOT/report_gdocs.py).
+#
+# Deliberately NOT in bpilot_mpe_dev.yml. B-PILOT runs perfectly well without
+# these: the backend is simply not offered and Configuration says why. Install
+# them only on a machine that will actually publish to Google Docs:
+#
+#     conda activate bpilot_mpe_dev
+#     pip install -r environments/gdocs-optional.txt
+#
+# DO NOT install these on redwood until the workflow is proven on a
+# workstation. The dependency closure is 17 packages and includes compiled
+# wheels (cffi, cryptography) -- pip-installed compiled packages in that conda
+# environment are what broke the GUI launch there once before (see
+# .context/DECISIONS.md, 2026-08-10, on pip PyQt5 vs conda-forge qt).
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.0
