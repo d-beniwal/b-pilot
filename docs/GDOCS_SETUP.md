@@ -12,7 +12,7 @@ proxy, no firewall rule.
 | Hosting | a host, TLS, a reverse proxy | none |
 | Updates | live, readers watch the page | on refresh, at most one per 30 s |
 | Hiding an entry | figures go offline instantly | applied on the next update; **Drive keeps earlier revisions** |
-| Figures | published | **not yet** — see "Figures" below |
+| Figures | published | published (embedded in the document) |
 | Link | unguessable URL you control | Google sharing link |
 
 The revision-history point is the one to think hardest about. Anyone with the
@@ -20,23 +20,17 @@ link can open the document's revision history, so something you published and
 then hid is still reachable. If that matters for your data, use the viewer
 service.
 
-## Figures (current limitation)
+## How figures get there
 
-Figures are **not carried into the document yet**. The payload is Markdown,
-which Drive converts to a Doc directly, and a relative `figures/*.png` path
-means nothing to Drive — the converted document shows the alt text and no
-image. Text publishes faithfully.
+B-PILOT builds a **`.docx`** locally (`B_PILOT/report_docx.py`) and uploads
+that for conversion. Images inside a `.docx` are real files in the archive, so
+Drive's converter turns them into inline pictures in the resulting Doc. The
+two simpler payloads both fail: Markdown carries relative `figures/*.png`
+paths that mean nothing to Drive, and the app's HTML export takes its colours
+from the session theme, so a dark session would publish near-white text.
 
-Resolving this needs one manual check that has not been run: export a report
-with a figure as HTML (Report panel → Export → HTML), upload the `.html` to
-Drive, open it as a Google Doc, and see whether the embedded images survive
-the conversion.
-
-- **They survive** → the payload switches to HTML and figures come for free.
-- **They do not** → each figure is uploaded to Drive separately and the links
-  rewritten, which makes them links rather than inline pixels.
-
-See the `PENDING` note at the top of `B_PILOT/report_gdocs.py`.
+If `python-docx` is not installed, the backend falls back to uploading the
+Markdown — the text still publishes, the figures do not.
 
 ## One-time setup
 
@@ -49,6 +43,8 @@ They are **not** in the pinned beamline environment and are deliberately not in
 conda activate bpilot_mpe_dev
 pip install -r environments/gdocs-optional.txt
 ```
+
+That includes `python-docx`, which is what puts the figures in the document.
 
 B-PILOT runs perfectly well without them — the backend is simply not offered,
 and Configuration says why. **Do not install these on redwood** until the

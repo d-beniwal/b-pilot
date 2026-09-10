@@ -1565,7 +1565,7 @@ class ConfigDialog(QtWidgets.QDialog):
                 "A Google Doc is not live — readers refresh, and updates are held to "
                 "one every 30 seconds. Hiding an entry removes it from the document "
                 "on the next update, but Drive keeps earlier revisions of what was "
-                "already published. Figures are not carried into the document yet.\n\n"
+                "already published, so hiding is not retroactive there.\n\n"
                 + shared
             )
         return (

@@ -14,3 +14,9 @@
 # .context/DECISIONS.md, 2026-08-10, on pip PyQt5 vs conda-forge qt).
 google-api-python-client>=2.100
 google-auth-oauthlib>=1.0
+
+# Builds the .docx that carries the report's figures into the Google Doc
+# (B_PILOT/report_docx.py). Pure Python; lxml is its only real dependency and
+# is already in this environment. Without it the backend still publishes, but
+# uploads Markdown and the figures are lost.
+python-docx>=1.1

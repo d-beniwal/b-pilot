@@ -12,7 +12,13 @@ has to say out loud rather than bury:
 * **Hiding an entry is no longer instant.** The HTTP service serves a figure
   only while the current document names it, so hiding takes the pixels offline
   immediately. Here the next push rewrites the document, but Drive keeps the
-  old revision, and a reader with the link can open revision history.
+  old revision, and a reader with the link can open revision history. This is
+  the sharpest difference between the two targets and the UI says so.
+
+Figures *do* publish: the payload is a ``.docx`` built by :mod:`report_docx`,
+whose images are real files inside the archive and survive Drive's conversion
+as inline pictures. See :data:`UPLOAD_MIME` for why not Markdown and why not
+themed HTML.
 * **The link is a Google sharing link**, with everything that implies about
   who can forward it.
 
@@ -43,6 +49,8 @@ import os
 import threading
 
 from . import config
+from . import experiment_history as eh
+from . import report_docx
 from . import report_sinks as sinks
 from .report_sinks import AUTH, OK, REVOKED, TRANSIENT, Document, Sink
 
@@ -71,30 +79,29 @@ MIN_INTERVAL_S = 30.0
 
 DOC_MIME = "application/vnd.google-apps.document"
 
-#: What we upload for conversion. Markdown, deliberately: Drive converts it to
-#: a Doc directly, so the payload is the *same bytes* the HTTP service gets and
-#: byte-identical to ``Export -> Markdown``. The obvious alternative -- feeding
-#: it ``report_render.to_html(embed_images=True)``, which already inlines
-#: figures as data: URIs -- would drag the app's *theme* into a document that
-#: has nothing to do with the screen (a dark session would upload near-white
-#: text), and fixing that means ``style.temporary_theme``, which mutates module
-#: globals and is therefore not safe to call from the worker thread while the
-#: GUI paints. See PENDING below for when that trade is worth revisiting.
-UPLOAD_MIME = "text/markdown"
+#: What we upload for conversion: a ``.docx`` built by :mod:`report_docx`.
+#: Drive converts it into a native Google Doc, and -- the reason for this
+#: choice -- images inside a ``.docx`` are real files in the archive rather
+#: than links or base64 in markup, so figures survive the conversion as inline
+#: pictures. Uploading the Markdown is simpler and was the first
+#: implementation, but a relative ``figures/x.png`` path means nothing to
+#: Drive, so every figure was silently dropped.
+#:
+#: Feeding it ``report_render.to_html(embed_images=True)`` instead was the
+#: other candidate. It was rejected for a structural reason, not a cosmetic
+#: one: its colours come from the *session's* theme, so a dark session would
+#: publish near-white text, and the established fix for that
+#: (``style.temporary_theme``, used by the PDF exporter) rebinds module globals
+#: -- safe on the GUI thread, not safe on this worker's thread while the GUI
+#: paints. ``report_docx`` carries no palette at all.
+UPLOAD_MIME = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 
-# PENDING (figures): Markdown upload cannot carry ``figures/*.png`` -- the
-# relative paths mean nothing to Drive, so a converted Doc shows the alt text
-# and no image. Two ways out, and which one is right depends on a 15-minute
-# manual check nobody has run yet: export the report as HTML, upload it to
-# Drive, open it as a Doc, and see whether the base64 data: URIs survive.
-#   * They survive -> switch the payload to HTML and solve the theme problem
-#     above properly (an explicit palette argument on ``to_html``, not a global
-#     swap).
-#   * They do not -> upload each figure to Drive as its own file and rewrite
-#     the image links to point at it. Figures then become links rather than
-#     inline pixels, and ``wants_figures()`` below must start returning True.
-# Until then this sink publishes text faithfully and figures not at all, and
-# `share`'s dialog says so.
+#: Falls back to uploading the Markdown when python-docx is not installed.
+#: Text still publishes; only the figures are lost. Degrading is better than
+#: refusing to publish at all, and the Configuration page says which is in use.
+FALLBACK_MIME = "text/markdown"
 
 _lock = threading.Lock()
 
@@ -230,15 +237,37 @@ def _classify(exc) -> tuple[str, str]:
     return TRANSIENT, message
 
 
+def _payload(doc: Document) -> tuple[bytes, str]:
+    """``(bytes, mimetype)`` to upload for conversion.
+
+    A ``.docx`` when :mod:`report_docx` is usable, so figures come through;
+    the raw Markdown otherwise, which still publishes the text.
+    """
+    if report_docx.available():
+        base = eh.experiment_dir(doc.beamline, doc.experiment)
+        title = doc.title or doc.experiment
+        return report_docx.build(doc.markdown, base_dir=base, title=title), UPLOAD_MIME
+    return doc.markdown.encode("utf-8"), FALLBACK_MIME
+
+
+def figures_supported() -> bool:
+    """Whether a published document will carry its figures.
+
+    The Report panel and the Configuration page both word themselves from this
+    rather than promising something the installation cannot deliver.
+    """
+    return report_docx.available()
+
+
 class GDocsSink(Sink):
     """Publishes into one Google Doc per shared experiment."""
 
     name = "gdocs"
     label = "Google Docs"
 
-    # Figures ride inside the document for the HTTP sink and not at all for
-    # this one yet -- see the PENDING note at the top of the module. Either
-    # way there is no separate upload phase today.
+    # Figures ride *inside* the uploaded .docx as real archive members, so
+    # there is no separate upload phase -- unlike the HTTP service, which
+    # posts each figure alongside the document.
     def wants_figures(self) -> bool:
         return False
 
@@ -344,10 +373,12 @@ class GDocsSink(Sink):
             service = self._service()
             if service is None:
                 return AUTH, "not connected to Google -- reconnect in Configuration"
+            try:
+                payload, mimetype = _payload(doc)
+            except Exception as exc:  # noqa: BLE001 -- a malformed record
+                return TRANSIENT, f"could not build the document: {type(exc).__name__}: {exc}"
             media = _MediaIoBaseUpload(
-                io.BytesIO(doc.markdown.encode("utf-8")),
-                mimetype=UPLOAD_MIME,
-                resumable=False,
+                io.BytesIO(payload), mimetype=mimetype, resumable=False
             )
             try:
                 service.files().update(fileId=file_id, media_body=media).execute()

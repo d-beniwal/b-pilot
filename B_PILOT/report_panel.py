@@ -881,10 +881,10 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 common
                 + "\n\nThis publishes to a Google Doc, so readers see updates when "
                 "they refresh rather than live, and updates are held to one every "
-                "30 seconds. Hiding an entry removes it on the next update, but "
+                "30 seconds.\n\nHiding an entry removes it on the next update, but "
                 "Google keeps earlier revisions of the document — anyone with the "
-                "link can open its revision history. Figures are not carried into "
-                "the document yet."
+                "link can open its revision history and see what was there before. "
+                "If that matters for this data, publish to a viewer service instead."
             )
         return (
             common

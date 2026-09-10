@@ -39,9 +39,9 @@ time.
     hiding an entry takes its figures offline instantly. Needs a host and TLS;
     see `report_server/README.md`.
   - **a Google Doc** — no hosting at all, but readers refresh rather than watch,
-    updates are held to one every 30 s, Drive keeps earlier revisions of what
-    was published, and figures are not carried over yet; see
-    `docs/GDOCS_SETUP.md`.
+    updates are held to one every 30 s, and Drive keeps earlier revisions of
+    what was published (so hiding an entry is not retroactive there). Figures
+    are carried into the document; see `docs/GDOCS_SETUP.md`.
 - **Configurable plan scope** — a Configuration dialog controls which
   directory is scanned for plans, which files are even shown in the file
   browser ("Plan visibility," with select-all/deselect-all), and what startup
