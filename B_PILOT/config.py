@@ -224,8 +224,10 @@ DEFAULTS: dict = {
     # per profile.
     "report_sync_enabled": False,
     # Where the mirror publishes to: "http" (the report_server/ service in this
-    # repo) or "gdocs" (a Google Doc shared read-only by link, see
-    # B_PILOT/report_gdocs.py). The HTTP service is the only genuinely *live*
+    # repo), "gdocs" (a Google Doc shared read-only by link, see
+    # B_PILOT/report_gdocs.py), or "outbox" (write to a shared folder and let
+    # the report_relay/ daemon on an internet-connected machine publish it --
+    # for a workstation with no route out). The HTTP service is the only genuinely *live*
     # target and the only one where hiding an entry takes its figures offline
     # instantly; Google Docs needs no hosting at all, which is the whole reason
     # it exists. An unavailable backend (the Google client libraries are not in

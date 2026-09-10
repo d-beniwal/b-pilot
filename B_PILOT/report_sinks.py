@@ -372,6 +372,13 @@ def _register_builtin() -> None:
     # The module always imports; it is `available()` that reports whether the
     # libraries did. That split is what lets the Configuration page say *why*
     # the backend is missing instead of silently omitting it.
+    # The outbox sink is pure stdlib, so it is always available -- which is
+    # the point: it is the backend for a machine that can install nothing.
+    if "outbox" not in _SINKS:
+        from .report_outbox import FileSink
+
+        _SINKS[FileSink.name] = FileSink
+
     global _gdocs_reason
     if "gdocs" not in _SINKS:
         try:

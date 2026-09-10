@@ -43,33 +43,25 @@ in the middle of a beamtime.
 """
 from __future__ import annotations
 
-import io
-import json
 import os
 import threading
 
 from . import config
 from . import experiment_history as eh
 from . import report_docx
+from . import report_drive as dr
 from . import report_sinks as sinks
 from .report_sinks import AUTH, OK, REVOKED, TRANSIENT, Document, Sink
 
-MISSING_REASON = ""
-try:
-    from google.auth.transport.requests import Request as _GoogleRequest
-    from google.oauth2.credentials import Credentials as _Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow as _InstalledAppFlow
-    from googleapiclient.discovery import build as _build
-    from googleapiclient.errors import HttpError as _HttpError
-    from googleapiclient.http import MediaIoBaseUpload as _MediaIoBaseUpload
-except Exception as exc:  # noqa: BLE001 -- absent, or a broken partial install
-    MISSING_REASON = f"{type(exc).__name__}: {exc}"
+# Everything that actually talks to Drive lives in report_drive, which takes
+# its configuration as arguments so the headless relay daemon can use the same
+# code with no profile, no Qt and no GUI. This module is the config-driven
+# half: it decides *which* token, *which* folder, *which* title, and nothing
+# else.
+MISSING_REASON = dr.MISSING_REASON
 
 CREDENTIALS_ENV = "BPILOT_GDOCS_CREDENTIALS"
-
-#: Only files this app created. Never widen this -- see the module docstring.
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-
+SCOPES = dr.SCOPES
 TOKEN_FILENAME = "gdocs_token.json"
 
 #: Floor on the push interval. A conversion upload is orders of magnitude more
@@ -77,15 +69,12 @@ TOKEN_FILENAME = "gdocs_token.json"
 #: make the document's history unreadable and burn quota for no reader benefit.
 MIN_INTERVAL_S = 30.0
 
-DOC_MIME = "application/vnd.google-apps.document"
-
 #: What we upload for conversion: a ``.docx`` built by :mod:`report_docx`.
 #: Drive converts it into a native Google Doc, and -- the reason for this
 #: choice -- images inside a ``.docx`` are real files in the archive rather
 #: than links or base64 in markup, so figures survive the conversion as inline
-#: pictures. Uploading the Markdown is simpler and was the first
-#: implementation, but a relative ``figures/x.png`` path means nothing to
-#: Drive, so every figure was silently dropped.
+#: pictures. Uploading the Markdown is simpler but a relative
+#: ``figures/x.png`` path means nothing to Drive, so every figure is dropped.
 #:
 #: Feeding it ``report_render.to_html(embed_images=True)`` instead was the
 #: other candidate. It was rejected for a structural reason, not a cosmetic
@@ -94,30 +83,27 @@ DOC_MIME = "application/vnd.google-apps.document"
 #: (``style.temporary_theme``, used by the PDF exporter) rebinds module globals
 #: -- safe on the GUI thread, not safe on this worker's thread while the GUI
 #: paints. ``report_docx`` carries no palette at all.
-UPLOAD_MIME = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
+UPLOAD_MIME = dr.DOCX_MIME
 
 #: Falls back to uploading the Markdown when python-docx is not installed.
 #: Text still publishes; only the figures are lost. Degrading is better than
 #: refusing to publish at all, and the Configuration page says which is in use.
-FALLBACK_MIME = "text/markdown"
+FALLBACK_MIME = dr.MARKDOWN_MIME
 
 _lock = threading.Lock()
 
 
 def available() -> bool:
     """Whether the Google client libraries imported."""
-    return not MISSING_REASON
+    return dr.available()
 
 
 def credentials_path() -> str:
     """OAuth client-secrets file, from the environment.
 
     In the environment rather than the profile for the same reason
-    ``BPILOT_REPORT_SYNC_TOKEN`` is: ``active_config.json`` is committed and
-    beamline accounts are shared, so a profile that named a credentials file
-    would arm every checkout of it.
+    ``BPILOT_REPORT_SYNC_TOKEN`` is: profiles travel between workstations, so a
+    profile that named a credentials file would arm every checkout of it.
     """
     return (os.environ.get(CREDENTIALS_ENV) or "").strip()
 
@@ -137,79 +123,12 @@ def connected() -> bool:
     return os.path.isfile(token_path())
 
 
-def _save_token(creds) -> None:
-    """Write the token 0600, atomically.
-
-    Same discipline as ``report_views``: a temp file in the same directory then
-    ``os.replace``, so a crash mid-write cannot leave a truncated credential
-    that reads as "connected" but refreshes into an auth error forever.
-    """
-    path = token_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(creds.to_json())
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-
-
-def load_credentials():
-    """Valid credentials, refreshing if needed, or ``None``.
-
-    Never starts a consent flow -- see the module docstring. ``None`` here
-    means "ask the user to reconnect in Configuration", which is what the
-    worker turns into an ``auth_error``.
-    """
-    if not available() or not connected():
-        return None
-    try:
-        creds = _Credentials.from_authorized_user_file(token_path(), SCOPES)
-    except Exception:  # noqa: BLE001 -- corrupt or hand-edited token file
-        return None
-    if creds and creds.valid:
-        return creds
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(_GoogleRequest())
-        except Exception:  # noqa: BLE001 -- revoked, offline, clock skew
-            return None
-        try:
-            _save_token(creds)
-        except OSError:
-            pass  # a token we could not cache still works for this session
-        return creds
-    return None
-
-
 def connect() -> tuple[bool, str]:
-    """Run the browser consent flow and store the token. GUI thread only.
-
-    Returns ``(ok, message)``. Called from the Configuration dialog's
-    "Connect Google account" button, never from the worker.
-    """
-    if not available():
-        return False, f"the Google client libraries are not installed ({MISSING_REASON})"
+    """Run the browser consent flow. GUI thread only, user-initiated."""
     path = credentials_path()
     if not path:
         return False, f"{CREDENTIALS_ENV} is not set in the environment"
-    if not os.path.isfile(path):
-        return False, f"{CREDENTIALS_ENV} points at a file that does not exist: {path}"
-    try:
-        flow = _InstalledAppFlow.from_client_secrets_file(path, SCOPES)
-        creds = flow.run_local_server(port=0)
-        _save_token(creds)
-    except Exception as exc:  # noqa: BLE001 -- user cancelled, bad client file, no browser
-        return False, f"{type(exc).__name__}: {exc}"
-    return True, "connected"
+    return dr.connect(path, token_path())
 
 
 def disconnect() -> None:
@@ -220,21 +139,11 @@ def disconnect() -> None:
         pass
 
 
-def _classify(exc) -> tuple[str, str]:
-    """Map a Google API failure onto the sink outcome vocabulary."""
-    status = getattr(getattr(exc, "resp", None), "status", None)
-    detail = ""
-    try:
-        payload = json.loads(getattr(exc, "content", b"") or b"{}")
-        detail = (payload.get("error") or {}).get("message") or ""
-    except Exception:  # noqa: BLE001
-        detail = str(exc)[:200]
-    message = f"HTTP {status}: {detail}" if status else f"{type(exc).__name__}: {exc}"
-    if status in (401, 403):
-        return AUTH, message
-    if status in (404, 410):
-        return REVOKED, message
-    return TRANSIENT, message
+def _client() -> "dr.DriveClient":
+    return dr.DriveClient(
+        token_path=token_path(),
+        folder_id=config.get("report_gdocs_folder_id") or "",
+    )
 
 
 def _payload(doc: Document) -> tuple[bytes, str]:
@@ -285,54 +194,17 @@ class GDocsSink(Sink):
     def url(self, view: dict | None) -> str:
         return (view or {}).get("gdoc_url") or ""
 
-    # ── Drive plumbing ───────────────────────────────────────────────────────
-
-    def _service(self):
-        creds = load_credentials()
-        if creds is None:
-            return None
-        # cache_discovery=False: the default file cache warns loudly under a
-        # non-writable home and buys nothing for two endpoints.
-        return _build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    @staticmethod
-    def _doc_url(file_id: str) -> str:
-        return f"https://docs.google.com/document/d/{file_id}/edit"
-
-    def _create_doc(self, service, title: str) -> str:
-        body = {"name": title, "mimeType": DOC_MIME}
-        folder = (config.get("report_gdocs_folder_id") or "").strip()
-        if folder:
-            body["parents"] = [folder]
-        created = service.files().create(body=body, fields="id").execute()
-        return created["id"]
-
-    def _share_anyone(self, service, file_id: str) -> None:
-        service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            fields="id",
-        ).execute()
-
-    def _unshare_anyone(self, service, file_id: str) -> None:
-        """Remove every anyone-with-link grant. Idempotent."""
-        listed = service.permissions().list(fileId=file_id, fields="permissions(id,type)").execute()
-        for perm in listed.get("permissions", []):
-            if perm.get("type") == "anyone":
-                service.permissions().delete(fileId=file_id, permissionId=perm["id"]).execute()
-
     # ── sink protocol ────────────────────────────────────────────────────────
+
+    def _title(self, beamline: str, experiment: str) -> str:
+        configured = (config.get("report_title") or "").strip()
+        return f"{configured or experiment} ({beamline})"
 
     def prepare_share(self, beamline: str, experiment: str, view: dict) -> dict:
         """Create the document and make it readable by link."""
         with _lock:
-            service = self._service()
-            if service is None:
-                return {}
-            title = (config.get("report_title") or "").strip() or experiment
-            file_id = self._create_doc(service, f"{title} ({beamline})")
-            self._share_anyone(service, file_id)
-            return {"gdoc_id": file_id, "gdoc_url": self._doc_url(file_id)}
+            file_id, url, error = _client().create_shared(self._title(beamline, experiment))
+            return {"gdoc_id": file_id, "gdoc_url": url} if not error else {}
 
     def rotate_target(self, beamline: str, experiment: str, view: dict) -> dict:
         """Publish into a *new* document and retire the old one.
@@ -340,75 +212,35 @@ class GDocsSink(Sink):
         A Doc's URL is its file id, so unlike the HTTP service there is no way
         to keep one document and invalidate its link. The old document is
         un-shared rather than deleted: it stays in the user's Drive as a record
-        of what was published, which is the same promise ``stop_sharing``
-        makes.
+        of what was published, which is the same promise ``revoke`` makes.
         """
         with _lock:
-            service = self._service()
-            if service is None:
-                return {}
+            client = _client()
             old = (view or {}).get("gdoc_id")
             if old:
-                try:
-                    self._unshare_anyone(service, old)
-                except Exception:  # noqa: BLE001 -- gone already, or no longer ours
-                    pass
-            title = (config.get("report_title") or "").strip() or experiment
-            file_id = self._create_doc(service, f"{title} ({beamline})")
-            self._share_anyone(service, file_id)
-            return {"gdoc_id": file_id, "gdoc_url": self._doc_url(file_id)}
+                client.retire(old)  # best effort; a failure must not block the new link
+            file_id, url, error = client.create_shared(self._title(beamline, experiment))
+            return {"gdoc_id": file_id, "gdoc_url": url} if not error else {}
 
     def push_doc(self, view: dict, doc: Document) -> tuple[str, str]:
         """Replace the document's contents in place.
 
         ``files.update`` keeps the file id, so the URL every reader holds stays
         valid for the life of the share -- the same snapshot-not-deltas
-        property the HTTP service has, for the same reason: a failed push is
-        simply retried with newer content.
+        property the HTTP service has, and for the same reason: a failed push
+        is simply retried with newer content.
         """
         file_id = (view or {}).get("gdoc_id")
         if not file_id:
             return TRANSIENT, "this experiment has no Google Doc yet"
+        try:
+            payload, mimetype = _payload(doc)
+        except Exception as exc:  # noqa: BLE001 -- a malformed record
+            return TRANSIENT, f"could not build the document: {type(exc).__name__}: {exc}"
         with _lock:
-            service = self._service()
-            if service is None:
-                return AUTH, "not connected to Google -- reconnect in Configuration"
-            try:
-                payload, mimetype = _payload(doc)
-            except Exception as exc:  # noqa: BLE001 -- a malformed record
-                return TRANSIENT, f"could not build the document: {type(exc).__name__}: {exc}"
-            media = _MediaIoBaseUpload(
-                io.BytesIO(payload), mimetype=mimetype, resumable=False
-            )
-            try:
-                service.files().update(fileId=file_id, media_body=media).execute()
-            except _HttpError as exc:
-                return _classify(exc)
-            except Exception as exc:  # noqa: BLE001 -- socket, DNS, TLS
-                return TRANSIENT, f"{type(exc).__name__}: {exc}"
-        return OK, ""
+            return _client().publish(file_id, payload, mimetype)
 
     def revoke(self, view: dict) -> tuple[str, str]:
-        """Stop sharing: remove the link grant, keep the document.
-
-        Deliberately not a delete. The document is the user's record of a
-        beamtime and deleting it on "stop sharing" would destroy data to
-        achieve access control. Removing the grant is what the button promises
-        and all it should do.
-        """
-        file_id = (view or {}).get("gdoc_id")
-        if not file_id:
-            return OK, ""
+        """Stop sharing: remove the link grant, keep the document."""
         with _lock:
-            service = self._service()
-            if service is None:
-                return AUTH, "not connected to Google -- reconnect in Configuration"
-            try:
-                self._unshare_anyone(service, file_id)
-            except _HttpError as exc:
-                outcome, message = _classify(exc)
-                # A document that is already gone is a successful revoke.
-                return (OK, "") if outcome == REVOKED else (outcome, message)
-            except Exception as exc:  # noqa: BLE001
-                return TRANSIENT, f"{type(exc).__name__}: {exc}"
-        return OK, ""
+            return _client().retire((view or {}).get("gdoc_id") or "")

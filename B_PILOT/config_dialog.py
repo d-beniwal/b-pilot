@@ -1418,6 +1418,7 @@ class ConfigDialog(QtWidgets.QDialog):
         names = {
             "http": "Viewer service you host (live)",
             "gdocs": "Google Doc (no hosting needed)",
+            "outbox": "Shared folder — a relay publishes it (no internet needed)",
         }
         return [(n, names.get(n, n)) for n in report_sinks.available()]
 
@@ -1427,15 +1428,15 @@ class ConfigDialog(QtWidgets.QDialog):
 
     def _on_report_backend_changed(self, *_a) -> None:
         """Show only the fields the chosen target actually uses."""
-        gdocs = self._report_backend() == "gdocs"
+        backend = self._report_backend()
+        gdocs = backend == "gdocs"
         on = self._report_sync_enabled.isChecked()
-        for widget in (self._report_sync_url,):
-            widget.setVisible(not gdocs)
-            widget.setEnabled(on)
+        http = backend == "http"
         for i in range(self._report_url_row.count()):
             item = self._report_url_row.itemAt(i).widget()
             if item is not None:
-                item.setVisible(not gdocs)
+                item.setVisible(http)
+                item.setEnabled(on)
         for layout in (self._report_gdocs_row, self._report_gdocs_folder_row):
             for i in range(layout.count()):
                 item = layout.itemAt(i).widget()
