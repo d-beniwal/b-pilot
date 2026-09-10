@@ -787,16 +787,29 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             from . import report_sync
         except Exception:  # noqa: BLE001
             return
+        from B_PILOT import report_sinks
+
         missing = []
         if not config.get("report_sync_enabled"):
             missing.append("• Configuration → Reports → “Mirror this report to a remote viewer”")
-        if not report_sync.service_url():
-            missing.append("• Configuration → Reports → the viewer service URL")
-        if not report_sync.push_token():
-            missing.append(
-                f"• the {report_sync.TOKEN_ENV} environment variable, exported before\n"
-                "  B-PILOT starts (add it to the same shell line that launches the GUI)"
-            )
+        if report_sinks.backend_name() == "gdocs":
+            from B_PILOT import report_gdocs
+
+            if not report_gdocs.credentials_path():
+                missing.append(
+                    f"• the {report_gdocs.CREDENTIALS_ENV} environment variable, exported\n"
+                    "  before B-PILOT starts (it names your Google OAuth client file)"
+                )
+            if not report_gdocs.connected():
+                missing.append("• a connected Google account — Configuration → Reports → Connect")
+        else:
+            if not report_sync.service_url():
+                missing.append("• Configuration → Reports → the viewer service URL")
+            if not report_sync.push_token():
+                missing.append(
+                    f"• the {report_sync.TOKEN_ENV} environment variable, exported before\n"
+                    "  B-PILOT starts (add it to the same shell line that launches the GUI)"
+                )
         QtWidgets.QMessageBox.information(
             self,
             "Remote sharing is not set up",
@@ -812,14 +825,7 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         box.setWindowTitle("Share this report")
         box.setIcon(QtWidgets.QMessageBox.Question)
         box.setText(f"Publish a live, read-only copy of “{self._experiment}”?")
-        box.setInformativeText(
-            "Anyone with the link can read this report, without an account and "
-            "without any access to this workstation.\n\n"
-            "The link is unguessable, but it is a key: whoever it is forwarded "
-            "to keeps access until you rotate or stop it. Hidden entries and "
-            "excluded plans are not published, and hiding an entry later also "
-            "removes its figures from the remote copy."
-        )
+        box.setInformativeText(self._share_caveats())
         box.setStandardButtons(QtWidgets.QMessageBox.Cancel)
         share = box.addButton("Share", QtWidgets.QMessageBox.AcceptRole)
         box.exec_()
@@ -844,23 +850,77 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         if clicked is copy:
             QtWidgets.QApplication.clipboard().setText(url)
         elif clicked is rotate:
-            if self._confirm(
-                "Replace the link?",
-                "The current link stops working and a new one takes its place. "
-                "Anyone still using the old one loses access — which is the point, "
-                "but you will need to send the new link to everyone who should keep it.",
-            ):
+            if self._confirm("Replace the link?", self._rotate_caveats()):
                 self._show_link(sync.rotate(self._beamline, self._experiment), "New link")
         elif clicked is stop:
-            if self._confirm(
-                "Stop sharing?",
-                "The remote copy is deleted and the link stops working.\n\n"
-                "If the service cannot be reached right now, the old link may keep "
-                "working until it can be — the status chip will say so rather than "
-                "claiming otherwise. Nothing on this workstation is affected.",
-            ):
+            if self._confirm("Stop sharing?", self._stop_caveats()):
                 sync.stop_sharing(self._beamline, self._experiment)
                 self._refresh_share_chip()
+
+    @staticmethod
+    def _is_gdocs() -> bool:
+        from B_PILOT import report_sinks
+
+        return report_sinks.backend_name() == "gdocs"
+
+    def _share_caveats(self) -> str:
+        """What the reader gets, and what this particular target costs.
+
+        Worded per backend because the differences are not cosmetic: one is
+        live and takes hidden figures offline instantly, the other keeps
+        revisions of everything it ever published.
+        """
+        common = (
+            "Anyone with the link can read this report, without any access to this "
+            "workstation.\n\nThe link is a key: whoever it is forwarded to keeps "
+            "access until you rotate or stop it. Hidden entries and excluded plans "
+            "are not published."
+        )
+        if self._is_gdocs():
+            return (
+                common
+                + "\n\nThis publishes to a Google Doc, so readers see updates when "
+                "they refresh rather than live, and updates are held to one every "
+                "30 seconds. Hiding an entry removes it on the next update, but "
+                "Google keeps earlier revisions of the document — anyone with the "
+                "link can open its revision history. Figures are not carried into "
+                "the document yet."
+            )
+        return (
+            common
+            + "\n\nHiding an entry later also removes its figures from the remote "
+            "copy immediately."
+        )
+
+    def _rotate_caveats(self) -> str:
+        if self._is_gdocs():
+            return (
+                "A new Google Doc is created and the old one stops being shared. "
+                "Anyone still using the old link loses access — which is the point, "
+                "but you will need to send the new link to everyone who should keep "
+                "it.\n\nThe old document stays in your Drive as a record of what "
+                "was published."
+            )
+        return (
+            "The current link stops working and a new one takes its place. "
+            "Anyone still using the old one loses access — which is the point, "
+            "but you will need to send the new link to everyone who should keep it."
+        )
+
+    def _stop_caveats(self) -> str:
+        if self._is_gdocs():
+            return (
+                "The document stops being shared and the link stops working.\n\n"
+                "The document itself stays in your Drive — it is your record of the "
+                "beamtime, so this removes access rather than deleting it. Nothing "
+                "on this workstation is affected."
+            )
+        return (
+            "The remote copy is deleted and the link stops working.\n\n"
+            "If the service cannot be reached right now, the old link may keep "
+            "working until it can be — the status chip will say so rather than "
+            "claiming otherwise. Nothing on this workstation is affected."
+        )
 
     def _confirm(self, title: str, text: str) -> bool:
         return (

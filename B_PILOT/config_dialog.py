@@ -1302,10 +1302,10 @@ class ConfigDialog(QtWidgets.QDialog):
         card = S.make_card("Remote viewer (share the report off-site)")
 
         blurb = QtWidgets.QLabel(
-            "Mirrors the report to a small web service you run, so collaborators "
-            "who are not at the beamline can follow it live. Traffic is outbound "
-            "only — this workstation opens no port, and a remote reader has no "
-            "access to it or to the instrument."
+            "Publishes a read-only copy of the report so collaborators who are not "
+            "at the beamline can follow it. Traffic is outbound only — this "
+            "workstation opens no port, and a remote reader has no access to it or "
+            "to the instrument."
         )
         blurb.setWordWrap(True)
         blurb.setStyleSheet(f"color: {S.MUTED};")
@@ -1321,6 +1321,26 @@ class ConfigDialog(QtWidgets.QDialog):
         self._report_sync_enabled.toggled.connect(self._on_report_sync_toggled)
         card.body.addWidget(self._report_sync_enabled)
 
+        # Backend picker. Only backends this installation can actually use are
+        # offered; the status line below says why one is missing rather than
+        # leaving a silently absent entry.
+        backend_row = QtWidgets.QHBoxLayout()
+        backend_row.addWidget(S.LabelRight("Publish to:"))
+        self._report_sync_backend = S.NoScrollComboBox()
+        for value, text in self._report_backend_choices():
+            self._report_sync_backend.addItem(text, value)
+        self._report_sync_backend.setToolTip(
+            "Where the report is published.\n\n"
+            "Viewer service: a small web service you host (report_server/ in this\n"
+            "repo). The only genuinely live option, and the only one where hiding\n"
+            "an entry takes its figures offline instantly. Needs a host and TLS.\n\n"
+            "Google Doc: no hosting at all, but readers must refresh, updates are\n"
+            "slower, and Drive keeps old revisions of what you published."
+        )
+        self._report_sync_backend.currentIndexChanged.connect(self._on_report_backend_changed)
+        backend_row.addWidget(self._report_sync_backend, 1)
+        card.body.addLayout(backend_row)
+
         url_row = QtWidgets.QHBoxLayout()
         url_row.addWidget(S.LabelRight("Service URL:"))
         self._report_sync_url = QtWidgets.QLineEdit()
@@ -1330,7 +1350,36 @@ class ConfigDialog(QtWidgets.QDialog):
             "repo). A beamline fact, so it is saved into the profile."
         )
         url_row.addWidget(self._report_sync_url, 1)
+        self._report_url_row = url_row
         card.body.addLayout(url_row)
+
+        # Google-only: connect an account, and optionally pin a Drive folder.
+        self._report_gdocs_row = QtWidgets.QHBoxLayout()
+        self._report_gdocs_connect = QtWidgets.QPushButton("Connect Google account…")
+        self._report_gdocs_connect.setToolTip(
+            "Opens a browser once to authorise B-PILOT.\n"
+            "The authorisation covers only documents this app creates —\n"
+            "not the rest of your Drive."
+        )
+        self._report_gdocs_connect.clicked.connect(self._on_gdocs_connect)
+        self._report_gdocs_row.addWidget(self._report_gdocs_connect)
+        self._report_gdocs_disconnect = QtWidgets.QPushButton("Disconnect")
+        self._report_gdocs_disconnect.clicked.connect(self._on_gdocs_disconnect)
+        self._report_gdocs_row.addWidget(self._report_gdocs_disconnect)
+        self._report_gdocs_row.addStretch(1)
+        card.body.addLayout(self._report_gdocs_row)
+
+        folder_row = QtWidgets.QHBoxLayout()
+        folder_row.addWidget(S.LabelRight("Drive folder id:"))
+        self._report_gdocs_folder = QtWidgets.QLineEdit()
+        self._report_gdocs_folder.setPlaceholderText("(optional — blank means My Drive)")
+        self._report_gdocs_folder.setToolTip(
+            "Create report documents inside this Drive folder. The id is the last\n"
+            "path segment of the folder's URL. Leave blank for the Drive root."
+        )
+        folder_row.addWidget(self._report_gdocs_folder, 1)
+        self._report_gdocs_folder_row = folder_row
+        card.body.addLayout(folder_row)
 
         lag_row = QtWidgets.QHBoxLayout()
         lag_row.addWidget(S.LabelRight("Max lag:"))
@@ -1353,20 +1402,81 @@ class ConfigDialog(QtWidgets.QDialog):
         self._report_sync_status.setWordWrap(True)
         card.body.addWidget(self._report_sync_status)
 
-        note = QtWidgets.QLabel(
-            "The push token is read from the BPILOT_REPORT_SYNC_TOKEN environment "
-            "variable and is deliberately not a setting: profiles are committed and "
-            "shared between workstations, so a token stored here would start "
-            "publishing from machines that never opted in. Export it on the same "
-            "shell line that launches B-PILOT, as with ARGO_API_KEY.\n\n"
-            "Links are unguessable and read-only, but they are keys — anyone they "
-            "are forwarded to keeps access until you rotate or stop the share. "
-            "Hidden entries and excluded plans are never published."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet(f"color: {S.MUTED};")
-        card.body.addWidget(note)
+        self._report_sync_note = QtWidgets.QLabel("")
+        self._report_sync_note.setWordWrap(True)
+        self._report_sync_note.setStyleSheet(f"color: {S.MUTED};")
+        card.body.addWidget(self._report_sync_note)
         return card
+
+    # -- remote-viewer helpers ----------------------------------------------
+
+    @staticmethod
+    def _report_backend_choices() -> list:
+        """``(value, label)`` for every backend this installation can use."""
+        from B_PILOT import report_sinks
+
+        names = {
+            "http": "Viewer service you host (live)",
+            "gdocs": "Google Doc (no hosting needed)",
+        }
+        return [(n, names.get(n, n)) for n in report_sinks.available()]
+
+    def _report_backend(self) -> str:
+        data = self._report_sync_backend.currentData()
+        return data or "http"
+
+    def _on_report_backend_changed(self, *_a) -> None:
+        """Show only the fields the chosen target actually uses."""
+        gdocs = self._report_backend() == "gdocs"
+        on = self._report_sync_enabled.isChecked()
+        for widget in (self._report_sync_url,):
+            widget.setVisible(not gdocs)
+            widget.setEnabled(on)
+        for i in range(self._report_url_row.count()):
+            item = self._report_url_row.itemAt(i).widget()
+            if item is not None:
+                item.setVisible(not gdocs)
+        for layout in (self._report_gdocs_row, self._report_gdocs_folder_row):
+            for i in range(layout.count()):
+                item = layout.itemAt(i).widget()
+                if item is not None:
+                    item.setVisible(gdocs)
+                    item.setEnabled(on)
+        self._refresh_report_sync_status()
+
+    def _on_gdocs_connect(self) -> None:
+        """Run the Google consent flow. GUI thread, user-initiated, never automatic."""
+        from B_PILOT import report_gdocs
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            ok, message = report_gdocs.connect()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if ok:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Connected",
+                "B-PILOT can now create and update its own Google Docs.\n\n"
+                "This authorisation covers only documents it creates — not the "
+                "rest of your Drive.",
+            )
+        else:
+            QtWidgets.QMessageBox.warning(self, "Could not connect", message)
+        self._refresh_report_sync_status()
+
+    def _on_gdocs_disconnect(self) -> None:
+        from B_PILOT import report_gdocs
+
+        report_gdocs.disconnect()
+        QtWidgets.QMessageBox.information(
+            self,
+            "Disconnected",
+            "The stored authorisation has been removed from this workstation.\n\n"
+            "Documents already shared stay shared — use Stop sharing in the Report "
+            "panel on each one to retire its link.",
+        )
+        self._refresh_report_sync_status()
 
     def _on_report_sync_toggled(self, on: bool) -> None:
         """Grey out the settings that only mean anything while sync is on.
@@ -1374,31 +1484,98 @@ class ConfigDialog(QtWidgets.QDialog):
         Same treatment as the queue-backend fields (see
         `_on_queue_backend_changed`).
         """
-        for widget in (self._report_sync_url, self._report_sync_interval):
+        for widget in (
+            self._report_sync_url,
+            self._report_sync_interval,
+            self._report_sync_backend,
+            self._report_gdocs_connect,
+            self._report_gdocs_disconnect,
+            self._report_gdocs_folder,
+        ):
             widget.setEnabled(on)
-        self._refresh_report_sync_status()
+        self._on_report_backend_changed()
 
     def _refresh_report_sync_status(self) -> None:
-        """Say plainly whether sharing is actually armed on this machine."""
+        """Say plainly whether sharing is armed, and what it will cost.
+
+        This is the one thing that makes a missing token or an unconnected
+        account discoverable. Without it the failure mode is "I ticked the box
+        and nothing happened", with nowhere to look.
+        """
+        from B_PILOT import report_gdocs
+        from B_PILOT import report_sinks
         from B_PILOT import report_sync
+
+        gdocs = self._report_backend() == "gdocs"
+        self._report_sync_note.setText(self._report_sync_note_text(gdocs))
 
         if not self._report_sync_enabled.isChecked():
             self._report_sync_status.setText("")
             return
-        if not report_sync.push_token():
+
+        missing = None
+        if gdocs:
+            if not report_sinks.available().count("gdocs"):
+                missing = (
+                    "the Google client libraries are not installed here "
+                    f"({report_sinks.unavailable_reason('gdocs')}). Publishing will "
+                    "fall back to the viewer service."
+                )
+            elif not report_gdocs.credentials_path():
+                missing = (
+                    f"{report_gdocs.CREDENTIALS_ENV} is not set in this process's "
+                    "environment, so there is no OAuth client to authorise with. "
+                    "Export it and restart B-PILOT."
+                )
+            elif not report_gdocs.connected():
+                missing = "no Google account is connected yet — press Connect above."
+        else:
+            if not report_sync.push_token():
+                missing = (
+                    f"{report_sync.TOKEN_ENV} is not set in this process's "
+                    "environment, so nothing will be published. Export it and "
+                    "restart B-PILOT."
+                )
+            elif not self._report_sync_url.text().strip():
+                missing = "no service URL yet."
+
+        if missing:
             self._report_sync_status.setStyleSheet(f"color: {S.WARNING};")
-            self._report_sync_status.setText(
-                f"⚠ {report_sync.TOKEN_ENV} is not set in this process's environment, "
-                "so nothing will be published. Export it and restart B-PILOT."
-            )
-        elif not self._report_sync_url.text().strip():
-            self._report_sync_status.setStyleSheet(f"color: {S.WARNING};")
-            self._report_sync_status.setText("⚠ No service URL yet.")
+            self._report_sync_status.setText(f"⚠ {missing}")
         else:
             self._report_sync_status.setStyleSheet(f"color: {S.SUCCESS};")
             self._report_sync_status.setText(
                 "✓ Ready. Share an experiment from the Report panel to publish it."
             )
+
+    @staticmethod
+    def _report_sync_note_text(gdocs: bool) -> str:
+        """The standing caveats, which differ by target enough to be worth saying."""
+        shared = (
+            "Links are read-only, but they are keys — anyone they are forwarded to "
+            "keeps access until you rotate or stop the share. Hidden entries and "
+            "excluded plans are never published."
+        )
+        if gdocs:
+            return (
+                "The OAuth client file is read from the BPILOT_GDOCS_CREDENTIALS "
+                "environment variable and is deliberately not a setting: profiles "
+                "are committed and shared between workstations, so storing it here "
+                "would start publishing from machines that never opted in.\n\n"
+                "A Google Doc is not live — readers refresh, and updates are held to "
+                "one every 30 seconds. Hiding an entry removes it from the document "
+                "on the next update, but Drive keeps earlier revisions of what was "
+                "already published. Figures are not carried into the document yet.\n\n"
+                + shared
+            )
+        return (
+            "The push token is read from the BPILOT_REPORT_SYNC_TOKEN environment "
+            "variable and is deliberately not a setting: profiles are committed and "
+            "shared between workstations, so a token stored here would start "
+            "publishing from machines that never opted in. Export it on the same "
+            "shell line that launches B-PILOT, as with ARGO_API_KEY.\n\n"
+            "Hiding an entry takes its figures offline immediately.\n\n" + shared
+        )
 
     # -- excluded-plan list helpers -----------------------------------------
 
@@ -1684,6 +1861,13 @@ class ConfigDialog(QtWidgets.QDialog):
         self._report_sync_enabled.setChecked(bool(cfg.get("report_sync_enabled", False)))
         self._report_sync_url.setText(cfg.get("report_sync_url", "") or "")
         self._report_sync_interval.setValue(int(cfg.get("report_sync_interval_s", 5) or 5))
+        self._report_gdocs_folder.setText(cfg.get("report_gdocs_folder_id", "") or "")
+        # An unavailable backend is not in the combo at all, so a profile naming
+        # one lands on the first entry (http) -- matching report_sinks'
+        # fall-back rather than silently keeping a target nothing can publish to.
+        want = cfg.get("report_sync_backend", "http") or "http"
+        index = self._report_sync_backend.findData(want)
+        self._report_sync_backend.setCurrentIndex(index if index >= 0 else 0)
         self._report_load_snapshots(cfg.get("report_snapshot_groups") or [])
         self._report_load_excluded(cfg.get("report_excluded_plans") or [])
 
@@ -1746,8 +1930,10 @@ class ConfigDialog(QtWidgets.QDialog):
             "report_enabled": self._report_enabled.isChecked(),
             "report_title": self._report_title.text().strip(),
             "report_sync_enabled": self._report_sync_enabled.isChecked(),
+            "report_sync_backend": self._report_backend(),
             "report_sync_url": self._report_sync_url.text().strip(),
             "report_sync_interval_s": self._report_sync_interval.value(),
+            "report_gdocs_folder_id": self._report_gdocs_folder.text().strip(),
             "report_excluded_plans": self._report_excluded_names(),
             "report_snapshot_groups": self._report_snapshot_values(),
             "device_search_paths": [
