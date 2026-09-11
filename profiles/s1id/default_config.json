@@ -6,7 +6,17 @@
   "visible_plan_files": [
     "scan_skeletons.py",
     "scans_standard.py",
-    "scans_stationary.py"
+    "scans_stationary.py",
+    "presets/s1id/grid_stepx_sw_samC.json",
+    "presets/s1id/grid_stepx_sw_samE.json",
+    "presets/s1id/grid_sweepx_sw_samC.json",
+    "presets/s1id/grid_sweepx_sw_samE.json",
+    "presets/s1id/hedmscan_sw_samC.json",
+    "presets/s1id/hedmscan_sw_samE.json",
+    "presets/s1id/pfscan_sw_samC.json",
+    "presets/s1id/pfscan_sw_samE.json",
+    "presets/s1id/tomoscan_sw_samC.json",
+    "presets/s1id/tomoscan_sw_samE.json"
   ],
   "bluesky_startup": "",
   "send_import_line": false,
@@ -178,6 +188,7 @@
     ],
     "per_step": [
       "hardware_sweep_",
+      "mixed_sweep_",
       "step_and_shoot_",
       "scaler_step_and_shoot_",
       "tomo_step_and_shoot_",
@@ -192,8 +203,10 @@
     ],
     "plan_closer": [
       "hardware_closer",
+      "midas_hw_closer",
       "generic_closer",
-      "scaler_closer"
+      "scaler_closer",
+      "midas_closer"
     ],
     "suspender": [
       "current_suspender",
@@ -209,7 +222,11 @@
     ],
     "pseudo_suspender": [
       "filename_mutator",
-      "drive_checker"
+      "inner_continuous",
+      "inner_snake",
+      "inner_weave",
+      "drive_checker",
+      "midas_caker"
     ]
   }
 }

@@ -44,6 +44,17 @@ _RE_PLAN = re.compile(r"\bRE\(\s*([A-Za-z_]\w*)\s*\(")
 # to chunk a queued command's leading positional tokens back into motor rows.
 _SKELETON_ROW_WIDTH = {"list": 2, "list_grid": 2, "step": 3, "step_grid": 4}
 
+# Preset "motors" object keys, in *args token order, for each skeleton shape --
+# the JSON-side spelling of _SKELETON_ROW_WIDTH above (see the presets'
+# README.md in the mpe_bluesky repo). A key a preset omits becomes a blank
+# field the user fills in.
+_SKELETON_ROW_KEYS = {
+    "list":      ("motor", "positions"),
+    "list_grid": ("motor", "positions"),
+    "step":      ("motor", "start", "stop"),
+    "step_grid": ("motor", "start", "stop", "nsteps"),
+}
+
 
 class PlanRunnerPanel(QtWidgets.QWidget):
     """File browser, plan selector, parameter form, and command builder."""
@@ -88,6 +99,11 @@ class PlanRunnerPanel(QtWidgets.QWidget):
         # alongside every other param-grid rebuild in `_clear_param_grid`.
         self._skeleton: tuple[str, bool] | None = None
         self._motor_rows_widget: MotorRowsWidget | None = None
+        # The scan preset currently applied to the form, or None for an
+        # ordinary plan. A preset is pre-filled values for its `parent_plan`,
+        # never a plan itself -- see plan_parser.find_preset_specs and
+        # `_dispatch_name`. Reset in `_clear_param_grid` like the rest.
+        self._preset: dict | None = None
         self._both_minimized_last = False
         # area_detector device name(s) bound in the most recently *composed*
         # (not hand-edited) command -- see _compose_lines / midas_bridge.py.
@@ -497,6 +513,13 @@ class PlanRunnerPanel(QtWidgets.QWidget):
             )
         elif spec.dtype == "choice":
             widget.setCurrentText(str(ast.literal_eval(value_node)))
+        elif spec.dtype == "block_list":
+            if not isinstance(value_node, (ast.List, ast.Tuple)):
+                raise ValueError("expected a list of function references")
+            names = {elt.id for elt in value_node.elts if isinstance(elt, ast.Name)}
+            for i in range(widget.count()):
+                item = widget.item(i)
+                item.setSelected(item.text() in names)
         elif spec.dtype == "block":
             if not isinstance(value_node, ast.Name):
                 raise ValueError("expected a bare function reference")
@@ -549,10 +572,14 @@ class PlanRunnerPanel(QtWidgets.QWidget):
             if not cb.isChecked():
                 continue
             module = P.file_to_module(abs_path, import_root)
-            for name, spec in P.find_plan_specs(abs_path).items():
+            for name, spec in P.find_plan_specs(abs_path, import_root).items():
                 if name not in self._plan_specs:
                     self._plan_specs[name] = spec
-                    self._plan_origins[name] = module
+                    # A preset dispatches its PARENT plan, so the import line
+                    # has to name the parent's module -- not the preset's own
+                    # path, which is a .json and imports nothing.
+                    dispatch = spec.get("dispatch")
+                    self._plan_origins[name] = dispatch["module"] if dispatch else module
                     self._plan_list.append(name)
 
         self._plan_cb.blockSignals(True)
@@ -597,6 +624,10 @@ class PlanRunnerPanel(QtWidgets.QWidget):
             self._doc_lbl.setText(summary or fallback)
             self._current_params = []
             self._rebuild_generic_form()
+        # A preset pre-fills the form just built for its parent plan. Must run
+        # after the rebuild, which clears `self._preset` along with the grid.
+        if spec and spec.get("preset"):
+            self._apply_preset(spec["preset"])
         self._live_validate()   # marks fields, gates Run, and renders the command
 
     def _clear_param_grid(self) -> None:
@@ -611,6 +642,7 @@ class PlanRunnerPanel(QtWidgets.QWidget):
         # read after switching to a different plan.
         self._skeleton = None
         self._motor_rows_widget = None
+        self._preset = None
 
     def _rebuild_param_form(self, params: list[ParamSpec], row_offset: int = 0) -> None:
         """Build the ordinary per-`ParamSpec` grid, starting at grid row `row_offset`.
@@ -654,6 +686,119 @@ class PlanRunnerPanel(QtWidgets.QWidget):
         self._param_grid.addWidget(self._motor_rows_widget, 0, 1)
 
         self._rebuild_param_form(params, row_offset=1)
+
+    # ── Scan presets ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _preset_value_node(spec: ParamSpec, value) -> ast.expr:
+        """A JSON preset value as the AST node `_apply_param_value` expects.
+
+        Going through AST rather than adding a second set of per-dtype widget
+        setters means presets and "Copy to form" share exactly one code path.
+        Device/block values are *names* in the running session (``pg6``,
+        ``samE.y``, ``tomo_sweep_``) so they are parsed as expressions; every
+        other dtype is an ordinary literal and goes through ``repr()``.
+        """
+        if spec.dtype in ("device", "block"):
+            return ast.parse(str(value), mode="eval").body
+        if spec.dtype in ("device_list", "block_list"):
+            items = value if isinstance(value, (list, tuple)) else [value]
+            return ast.parse(
+                "[" + ", ".join(str(i) for i in items) + "]", mode="eval"
+            ).body
+        return ast.parse(repr(value), mode="eval").body
+
+    def _apply_preset(self, preset: dict) -> None:
+        """Fill the parent plan's form in from `preset` (see its README.md).
+
+        A key the preset omits is deliberately left blank / at the plan's own
+        default, so this only ever *sets* fields -- it never clears one the
+        rebuild already populated with a signature default.
+        """
+        self._preset = preset
+        skipped: list[str] = []
+
+        # -- motor rows (the parent plan's *args) --
+        if self._skeleton and self._motor_rows_widget is not None:
+            shape, _relative = self._skeleton
+            keys = _SKELETON_ROW_KEYS.get(shape)
+            rows = preset.get("motors") or []
+            if keys and rows:
+                token_rows = []
+                for row in rows:
+                    row = row if isinstance(row, dict) else {}
+                    tokens = []
+                    for key in keys:
+                        value = row.get(key)
+                        if value is None:
+                            tokens.append("")          # user fills this in
+                        elif isinstance(value, (list, tuple)):
+                            tokens.append("[" + ", ".join(str(v) for v in value) + "]")
+                        else:
+                            tokens.append(str(value))
+                    token_rows.append(tokens)
+                try:
+                    self._motor_rows_widget.load_rows(token_rows)
+                except Exception:  # noqa: BLE001 — one bad row shouldn't kill the form
+                    skipped.append("Motors")
+
+        # -- keyword values --
+        for name, value in (preset.get("values") or {}).items():
+            if name not in self._param_widgets:
+                skipped.append(name)   # renamed/removed parameter in a stale preset
+                continue
+            spec, _widget = self._param_widgets[name]
+            try:
+                self._apply_param_value(name, self._preset_value_node(spec, value))
+            except Exception:  # noqa: BLE001
+                skipped.append(name)
+
+        # -- fields this preset makes mandatory --
+        # Rewriting the ParamSpec (rather than special-casing `required` in
+        # _live_validate/_parse_params) means the existing validation and value
+        # extraction pick it up with no new logic. Build a new list so the
+        # cached parent-plan spec shared with every other preset is untouched.
+        required = set(preset.get("required") or ())
+        if required:
+            promoted = []
+            for spec in self._current_params:
+                if spec.name in required and not spec.required:
+                    spec = spec._replace(required=True, blank_omits=False)
+                    if spec.name in self._param_widgets:
+                        self._param_widgets[spec.name] = (
+                            spec, self._param_widgets[spec.name][1],
+                        )
+                promoted.append(spec)
+            self._current_params = promoted
+
+        if skipped:
+            self._flash_status(
+                f"Preset '{preset.get('name', '?')}' — couldn't apply: "
+                f"{', '.join(skipped)}"
+            )
+
+    def _dispatch_name(self) -> str:
+        """The plan the generated command actually calls.
+
+        Normally the selected plan. For a preset it is the `parent_plan` the
+        preset fills in — a preset's own name is a GUI label and never reaches
+        the RunEngine or the queueserver.
+        """
+        plan_name = self._plan_cb.currentText()
+        spec = self._plan_specs.get(plan_name)
+        dispatch = spec.get("dispatch") if spec else None
+        return dispatch["plan"] if dispatch else plan_name
+
+    def _preset_md(self) -> dict:
+        """Provenance metadata for the active preset (``{}`` when none).
+
+        Lands in the run's start document, so a scan run from a preset can be
+        traced back to it even though the dispatched command names only the
+        skeleton plan.
+        """
+        if not self._preset:
+            return {}
+        return {"preset": self._preset.get("name")}
 
     def _rebuild_generic_form(self) -> None:
         self._clear_param_grid()
@@ -792,10 +937,15 @@ class PlanRunnerPanel(QtWidgets.QWidget):
         # unknown: the MPE session loads `from instrument.collection import *`,
         # which re-exports every plan, so this import resolves for any real plan.
         module = self._plan_origins.get(plan_name, "instrument.collection")
-        return command_builder.make_import_line(plan_name, module)
+        # For a preset both of these describe the PARENT plan: the module came
+        # from its `dispatch` in `_refresh_plan_dropdown`, the name from here.
+        return command_builder.make_import_line(self._dispatch_name(), module)
 
     def _make_re_line(self, plan_name: str, values: dict, notes: str = "") -> str:
-        return command_builder.make_re_line(plan_name, self._current_params, values, notes)
+        return command_builder.make_re_line(
+            self._dispatch_name(), self._current_params, values, notes,
+            extra_md=self._preset_md(),
+        )
 
     def _compose_lines(self) -> tuple[str, str] | tuple[None, None]:
         """Return (import_line, re_line) if the form is valid, else (None, None)."""
@@ -903,11 +1053,11 @@ class PlanRunnerPanel(QtWidgets.QWidget):
         # regardless of what shape the target mpe_bluesky checkout's plans
         # happen to be in.
         if config.get("queue_backend") == "qs" and not self._editing:
-            plan_name = self._plan_cb.currentText()
             values, errors = self._parse_params()
             if not errors and values:
                 qs_item = command_builder.make_queue_item(
-                    plan_name, self._current_params, values
+                    self._dispatch_name(), self._current_params, values,
+                    extra_md=self._preset_md(),
                 ) or {}
         if config.get("queue_backend") == "qs" and not qs_item:
             # Hand-edited text or an unsupported plan shape (the generic

@@ -65,7 +65,15 @@ def make_re_line(
     params: list[ParamSpec],
     values: dict,
     notes: str = "",
+    extra_md: dict | None = None,
 ) -> str:
+    """Compose the ``RE(plan(...))`` line.
+
+    `extra_md` adds entries to the run's ``md`` alongside `notes` -- used for
+    scan-preset provenance (``{'preset': 'tomoscan_sw'}``), since a preset
+    dispatches its parent skeleton plan and would otherwise leave no trace of
+    which preset produced the run. `notes` wins on a key collision.
+    """
     if "__args__" in values:
         inner = f"{plan_name}({values['__args__']})"
     else:
@@ -82,9 +90,12 @@ def make_re_line(
             rendered = str(val) if isinstance(val, RawCode) else repr(val)
             args.append(f"{spec.name}={rendered}")
         inner = f"{plan_name}({', '.join(args)})"
+    # Lands in the run's start document (cat[uid].metadata["start"][...]).
+    md = {k: v for k, v in (extra_md or {}).items() if v is not None}
     if notes:
-        # Lands in the run's start document (cat[uid].metadata["start"]["notes"]).
-        return f"RE({inner}, md={{'notes': {notes!r}}})"
+        md["notes"] = notes
+    if md:
+        return f"RE({inner}, md={md!r})"
     return f"RE({inner})"
 
 
@@ -107,8 +118,16 @@ def make_queue_item(
     plan_name: str,
     params: list[ParamSpec],
     values: dict,
+    extra_md: dict | None = None,
 ) -> dict | None:
     """Return a QS ``item_add``-shaped dict: ``{item_type, name, args, kwargs}``.
+
+    `extra_md` becomes the item's ``md`` kwarg -- scan-preset provenance, the
+    queue-side counterpart of :func:`make_re_line`'s. Only ever non-empty for
+    a preset, whose `parent_plan` is one of the ``scan_skeletons.py`` plans;
+    all six take an ``md`` argument, so it is always bindable. (It cannot be
+    checked against `params` here: ``md`` is deliberately undocumented, so it
+    never appears as a `ParamSpec`.)
 
     Mirrors `make_re_line`'s walk over `params`/`values`, but keeps native
     Python values instead of `repr()`'d source text (QS's ZMQ transport
@@ -188,6 +207,9 @@ def make_queue_item(
             kwargs[spec.name] = [list(v) if isinstance(v, tuple) else v for v in val]
         else:
             kwargs[spec.name] = val
+    md = {k: v for k, v in (extra_md or {}).items() if v is not None}
+    if md:
+        kwargs["md"] = md
     return {"item_type": "plan", "name": plan_name, "args": args, "kwargs": kwargs}
 
 

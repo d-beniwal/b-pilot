@@ -113,6 +113,21 @@ def _make_field_widget(spec: ParamSpec, on_change):
         widget.addItems(device_source.get_catalog().names_for(spec.category))
         widget.setFixedHeight(S.px(90))
         widget.itemSelectionChanged.connect(on_change)
+    elif spec.dtype == "block_list":
+        # List of building-block references (suspenders / pseudo_suspenders)
+        # -> multi-select over the same `plan_building_blocks` catalog the
+        # single-valued `block` dtype uses. Unlike `block` this one may be
+        # left empty: an empty suspender list is the plan's own default and
+        # a perfectly ordinary scan.
+        widget = QtWidgets.QListWidget()
+        widget.setSelectionMode(
+            QtWidgets.QAbstractItemView.ExtendedSelection
+        )
+        widget.addItems(
+            (config.get("plan_building_blocks") or {}).get(spec.category) or []
+        )
+        widget.setFixedHeight(S.px(90))
+        widget.itemSelectionChanged.connect(on_change)
     elif spec.dtype == "block":
         # scan_skeletons.py building-block function reference (plan_opener/
         # per_step/plan_closer) -> dropdown of names from the active
@@ -277,6 +292,10 @@ def field_error(spec: ParamSpec, widget) -> str | None:
         if not widget.selectedItems() and spec.required:
             return f"{short}: required"
         return None
+    if spec.dtype == "block_list":
+        if not widget.selectedItems() and spec.required:
+            return f"{short}: required"
+        return None
     if spec.dtype == "block":
         # Always required, regardless of the signature's default (see
         # `build_grid`'s "block" branch) — a blank plan_opener/per_step/
@@ -429,6 +448,14 @@ def parse_values(
             elif spec.required:
                 errors.append(f"{short}: required")
             # else: empty -> omit the arg (plan uses its default, e.g. [])
+        elif spec.dtype == "block_list":
+            # List of function references (RawCode, emitted unquoted).
+            names = [it.text() for it in widget.selectedItems()]
+            if names:
+                values[spec.name] = RawCode("[" + ", ".join(names) + "]")
+            elif spec.required:
+                errors.append(f"{short}: required")
+            # else: empty -> omit the arg (plan uses its default, [])
         elif spec.dtype == "block":
             # RawCode -> emitted unquoted (a real function reference).
             # Always required (see `field_error`) — never omitted.

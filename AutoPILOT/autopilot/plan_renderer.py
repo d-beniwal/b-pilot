@@ -45,7 +45,7 @@ def _slug(text: str) -> str:
 
 
 def _typespec(spec) -> str:
-    if spec.dtype in ("device", "device_list"):
+    if spec.dtype in ("device", "device_list", "block", "block_list"):
         base = f"{spec.dtype}{{{spec.category}}}"
     elif spec.dtype == "choice":
         base = f"choice{{{', '.join(spec.choices or [])}}}"
@@ -59,7 +59,8 @@ def _default_code(spec, value) -> str:
         # Both are real Python identifiers (an ophyd object or a
         # building-block function) bound via imports -- never a quoted string.
         return "None" if value is None else str(value)
-    if spec.dtype == "device_list":
+    if spec.dtype in ("device_list", "block_list"):
+        # Lists of real Python identifiers -- emitted unquoted, same reason.
         return "[" + ", ".join(str(v) for v in (value or [])) + "]"
     return repr(value)
 
@@ -73,7 +74,7 @@ def _signature_default_code(spec, value) -> str:
     `render()`'s signature line needs this; `render_command()` builds a call
     expression, not a signature, so `_default_code` is safe there as-is.
     """
-    if spec.dtype == "device_list":
+    if spec.dtype in ("device_list", "block_list"):
         return "None"
     return _default_code(spec, value)
 
@@ -142,7 +143,7 @@ def render(template: Template, clean: dict, catalog: DeviceCatalog, summary: str
         doc_lines.append(f"    {spec.name} : {_typespec(spec)}")
         doc_lines.append(f"        {spec.short} :: {spec.long}")
         doc_lines.append("")
-        if spec.dtype == "device_list":
+        if spec.dtype in ("device_list", "block_list"):
             default_literal = _default_code(spec, clean.get(spec.name))
             guard_lines.append(f"    {spec.name} = list({spec.name}) if {spec.name} else {default_literal}")
 

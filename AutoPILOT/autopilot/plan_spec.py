@@ -100,6 +100,20 @@ def build_tool_schema(template: Template, catalog: DeviceCatalog, blocks: dict) 
             required.append(spec.name)  # forced -- never optional, regardless of spec.required
             continue
 
+        if spec.dtype == "block_list":
+            # List form of `block` (suspenders / pseudo_suspenders). Unlike
+            # `block` it is NOT forced required: an empty suspender list is
+            # the plan's own default and an ordinary scan.
+            names = blocks.get(spec.category, [])
+            properties[spec.name] = {
+                "type": "array",
+                "items": {"type": "string", "enum": names},
+                "description": spec.long,
+            }
+            if spec.required:
+                required.append(spec.name)
+            continue
+
         if spec.dtype in ("device", "device_list"):
             names = catalog.names_for(spec.category)
             item_schema = {"type": "string", "enum": names, "description": spec.long}
@@ -300,6 +314,24 @@ def validate(template: Template, raw: dict, catalog: DeviceCatalog, blocks: dict
                 errors.append(f"{spec.name}: {value!r} is not a known {spec.category} building block (choices: {valid})")
             else:
                 clean[spec.name] = value
+            continue
+
+        if spec.dtype == "block_list":
+            valid = blocks.get(spec.category, [])
+            value = raw.get(spec.name)
+            if spec.name not in raw or value in (None, "", []):
+                clean[spec.name] = spec.default
+                continue
+            if not isinstance(value, (list, tuple)):
+                errors.append(f"{spec.name}: expected a list of {spec.category} names")
+                continue
+            bad = [v for v in value if v not in valid]
+            if bad:
+                errors.append(
+                    f"{spec.name}: unknown {spec.category} building block(s) {bad} (choices: {valid})"
+                )
+            else:
+                clean[spec.name] = list(value)
             continue
 
         if spec.dtype == "device" and spec.category == "motor":

@@ -17,7 +17,11 @@ NumPy-style ``Parameters`` grammar so the GUI can build a form::
         <short name> :: <long description>
 
 * dtype in {str, int, float, bool, choice{a, b, ...}, positions, device{cat},
-  device_list{cat}, block{cat}, code}
+  device_list{cat}, block{cat}, block_list{cat}, code}
+* ``block_list{cat}`` is the list form of ``block`` -- a multi-select over the
+  same ``plan_building_blocks`` catalog, for arguments that take several
+  building blocks at once (``suspenders``, ``pseudo_suspenders``). Unlike
+  ``block`` it may be left empty, which omits the argument.
 * ``code`` is a raw Python expression, emitted unquoted -- for arguments that
   are neither scalars nor catalog-enumerable (a dict such as ``md``, a list of
   device objects). Validated as a parseable expression, never executed.
@@ -36,6 +40,7 @@ EPICS connections, so this reads the file with the ``ast`` module only.
 """
 
 import ast
+import json
 import os
 import re
 from collections import namedtuple
@@ -59,16 +64,23 @@ USER_DIR = _paths.PLANS_DIR
 # File in USER_DIR checked by default on startup.
 DEFAULT_PLAN_FILE = "scans_stationary_gui_testing.py"
 
+# Directory name (anywhere under USER_DIR) whose ``.json`` files are read as
+# scan presets rather than ignored.  Restricting by directory keeps an
+# unrelated ``.json`` sitting in the plans tree out of the file browser --
+# see :func:`scan_user_dir` / :func:`find_preset_specs`.
+PRESETS_DIRNAME = "presets"
+
 
 # ── Docstring / signature parser (AST only — never imports the plan module) ────
 
 # One parsed argument.  default/required/blank_omits come from the SIGNATURE;
 # dtype/units/short/long/choices/category come from the DOCSTRING.
 #
-# ``category`` is only meaningful for the device dtypes and ``block``: for
-# device/device_list it names the device group (e.g. "area_detector",
-# "scaler"); for block it names which of the profile's `plan_building_blocks`
-# lists (plan_opener/per_step/plan_closer) the GUI should offer.
+# ``category`` is only meaningful for the device dtypes and ``block``/
+# ``block_list``: for device/device_list it names the device group (e.g.
+# "area_detector", "scaler"); for block/block_list it names which of the
+# profile's `plan_building_blocks` lists (plan_opener/per_step/plan_closer/
+# suspender/pseudo_suspender) the GUI should offer.
 #
 # ``motor_whole`` is only meaningful for dtype=="device", category=="motor"
 # (set via the ``:whole`` typespec modifier, e.g. ``device{motor:whole}``):
@@ -101,7 +113,7 @@ _NODEFAULT = object()  # sentinel: signature arg with no default (=> required)
 # dispatch instead of at the kernel.
 _KNOWN_DTYPES = {
     "str", "int", "float", "bool", "choice", "positions", "device", "device_list",
-    "block", "code",
+    "block", "block_list", "code",
 }
 
 # ``instrument/plans/scan_skeletons.py``'s six generic scan plans all take their
@@ -281,6 +293,7 @@ def _parse_typespec(typespec: str) -> tuple[str, str, list[str], str | None, boo
         'device_list{scaler}'  -> ('device_list', '', [], 'scaler', False)
         'device'               -> ('device', '', [], None, False)
         'block{plan_opener}'   -> ('block', '', [], 'plan_opener', False)
+        'block_list{suspender}'-> ('block_list', '', [], 'suspender', False)
         'device{motor:whole}'  -> ('device', '', [], 'motor', True)
     """
     units = ""
@@ -297,7 +310,7 @@ def _parse_typespec(typespec: str) -> tuple[str, str, list[str], str | None, boo
     # device_list{cat} | block{cat}.  choice -> comma list; device*/block ->
     # single category, optionally suffixed ``:whole`` (meaningful only for
     # device{motor:whole} -- caller/validator flags any other use as misuse).
-    bm = re.match(r"(choice|device_list|device|block)\s*\{(.*)\}$", dtype)
+    bm = re.match(r"(choice|device_list|device|block_list|block)\s*\{(.*)\}$", dtype)
     if bm:
         dtype = bm.group(1)
         payload = bm.group(2)
@@ -321,7 +334,24 @@ def _parse_body(body_lines: list[str]) -> tuple[str, str]:
     return text, ""
 
 
-def find_plan_specs(filepath: str) -> dict[str, dict]:
+def find_plan_specs(filepath: str, src_dir: str | None = None) -> dict[str, dict]:
+    """Return ``{plan_name: spec}`` for a plan file — Python module or preset.
+
+    Dispatches on extension so every caller gets both kinds without branching:
+    a ``.py`` file is AST-parsed by :func:`_find_python_plan_specs`, a ``.json``
+    preset is resolved by :func:`find_preset_specs` against the skeleton plan it
+    names.  Both return the same spec shape, so the form-building code
+    downstream cannot tell them apart.
+
+    `src_dir` is the import root a preset's ``parent_module`` is resolved
+    against; ignored for ``.py`` files, and defaults to :data:`SRC_DIR`.
+    """
+    if filepath.endswith(".json"):
+        return find_preset_specs(filepath, src_dir)
+    return _find_python_plan_specs(filepath)
+
+
+def _find_python_plan_specs(filepath: str) -> dict[str, dict]:
     """AST-parse a .py file; return {plan_name: {summary, params, documented}}.
 
     ``params`` is an ordered list of :class:`ParamSpec` (signature order,
@@ -393,6 +423,79 @@ def find_plan_specs(filepath: str) -> dict[str, dict]:
             "has_varargs": node.args.vararg is not None,
         }
     return specs
+
+
+# ── Scan presets (JSON) ───────────────────────────────────────────────────────
+# A preset is NOT a plan.  It is a set of pre-filled values for one of the
+# `scan_skeletons.py` plans, stored as JSON in the mpe_bluesky repo
+# (`instrument/plans/presets/<beamline>/*.json`; see that folder's README.md for
+# the schema).  Selecting one in the plan runner builds the *parent plan's*
+# ordinary form and fills it in — what gets dispatched is a plain
+# `mpe_step_grid_scan(...)` call, so nothing here reaches the RunEngine or needs
+# registering with the queueserver.
+#
+# `find_preset_specs` therefore returns the parent plan's own spec (same
+# `ParamSpec` list, same `skeleton` shape) with two extra keys:
+#   "preset"   -- the parsed JSON, applied to the widgets by
+#                 `plan_runner.PlanRunnerPanel._apply_preset`
+#   "dispatch" -- {"plan", "module"} of the parent, so the generated import and
+#                 `RE(...)` lines name the skeleton rather than the preset.
+
+# Keys a preset must carry to be usable at all.
+_PRESET_REQUIRED_KEYS = ("name", "parent_plan", "parent_module")
+
+
+def load_preset(filepath: str) -> dict | None:
+    """Parse a preset ``.json``, or None if it is unreadable or malformed.
+
+    Only structural validation happens here — that the file is a JSON object
+    carrying the keys needed to resolve its parent plan.  Checking the *values*
+    against the real skeleton signature is the job of the preset validator that
+    ships beside the presets themselves
+    (``instrument/plans/presets/validate_presets.py``).
+    """
+    try:
+        with open(filepath, encoding="utf-8") as fh:
+            preset = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(preset, dict):
+        return None
+    if any(not isinstance(preset.get(k), str) for k in _PRESET_REQUIRED_KEYS):
+        return None
+    return preset
+
+
+def find_preset_specs(filepath: str, src_dir: str | None = None) -> dict[str, dict]:
+    """``{preset_name: spec}`` for one preset file — ``{}`` if unusable.
+
+    The returned spec is the parent plan's, so the plan runner's existing
+    skeleton/motor-rows/param-form machinery renders it unchanged.
+    """
+    preset = load_preset(filepath)
+    if preset is None:
+        return {}
+
+    root = src_dir or SRC_DIR
+    parent_path = os.path.join(root, *preset["parent_module"].split(".")) + ".py"
+    parent_specs = _find_python_plan_specs(parent_path)
+    parent = parent_specs.get(preset["parent_plan"])
+    if parent is None:
+        return {}  # stale preset: its parent plan was renamed or removed
+
+    summary = preset.get("summary") or parent["summary"]
+    label = preset.get("label")
+    return {
+        preset["name"]: {
+            **parent,
+            "summary": f"{label} — {summary}" if label else summary,
+            "preset": preset,
+            "dispatch": {
+                "plan": preset["parent_plan"],
+                "module": preset["parent_module"],
+            },
+        }
+    }
 
 
 # ── Raw signature/docstring access (for docstring-authoring assistance) ────────
@@ -534,13 +637,17 @@ def file_defines_function(filepath: str, name: str) -> bool:
     )
 
 
-def scan_user_dir(user_dir: str, _depth: int = 0) -> list[tuple]:
+def scan_user_dir(user_dir: str, _depth: int = 0, _in_presets: bool = False) -> list[tuple]:
     """Recursive scan; returns (display_name, kind, abs_path, depth).
 
     ``depth`` counts directory levels below ``user_dir`` (0 for top-level
     entries, 1 for one directory deep, etc. — used by the GUI to indent).
     Recurses to unlimited depth so plans nested in sub-sub-directories (e.g.
     a per-beamline plans dir's own ``user_plans/`` folder) are found too.
+
+    ``.py`` files are listed everywhere; ``.json`` files only inside a
+    :data:`PRESETS_DIRNAME` directory (or below one), so an unrelated JSON
+    sitting in the plans tree never shows up as a selectable plan file.
     """
     rows: list[tuple] = []
     try:
@@ -555,7 +662,13 @@ def scan_user_dir(user_dir: str, _depth: int = 0) -> list[tuple]:
             continue
         if entry.is_dir():
             rows.append((entry.name + "/", "dir", entry.path, _depth))
-            rows.extend(scan_user_dir(entry.path, _depth + 1))
-        elif entry.is_file() and entry.name.endswith(".py"):
+            rows.extend(scan_user_dir(
+                entry.path, _depth + 1,
+                _in_presets or entry.name == PRESETS_DIRNAME,
+            ))
+        elif entry.is_file() and (
+            entry.name.endswith(".py")
+            or (_in_presets and entry.name.endswith(".json"))
+        ):
             rows.append((entry.name, "file", entry.path, _depth))
     return rows
