@@ -91,7 +91,7 @@ inside a beamline's Bluesky root, e.g.:
 <beamline-bluesky-project>/
 ├── instrument/
 ├── blueskyStarter.sh (or qserver.sh)
-└── B-PILOT/            <- this repo
+└── b-pilot/            <- this repo
     ├── launch.py
     └── B_PILOT/
 ```

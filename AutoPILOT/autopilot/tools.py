@@ -545,7 +545,7 @@ def build_list_directory_schema() -> dict:
             "the mpe_bluesky project (GUI code, instrument plans, docs, "
             "READMEs -- everything except a small denylist of sensitive "
             "files/dirs). Use this to orient yourself before searching or "
-            "reading, e.g. to see what's inside B_PILOT/ or B-PILOT/documents/."
+            "reading, e.g. to see what's inside B_PILOT/ or b-pilot/documents/."
         ),
         "input_schema": {
             "type": "object",
@@ -554,7 +554,7 @@ def build_list_directory_schema() -> dict:
                     "type": "string",
                     "description": (
                         "Directory path, relative to the mpe_bluesky Bluesky root "
-                        "(e.g. 'B-PILOT/B_PILOT') or absolute. Omit to list the "
+                        "(e.g. 'b-pilot/B_PILOT') or absolute. Omit to list the "
                         "Bluesky root itself."
                     ),
                 }
@@ -588,7 +588,7 @@ def build_search_codebase_schema() -> dict:
                 },
                 "path_prefix": {
                     "type": "string",
-                    "description": "Optional subtree to restrict the search to, e.g. 'B-PILOT/B_PILOT'.",
+                    "description": "Optional subtree to restrict the search to, e.g. 'b-pilot/B_PILOT'.",
                 },
                 "limit": {
                     "type": "integer",
@@ -706,7 +706,7 @@ def search_codebase(query: str, path_prefix: str | None, limit: int | None) -> d
 
     # More matches than the display cap: a single noisy subtree (e.g.
     # instrument/, with dozens of hits) could otherwise starve out other
-    # subtrees (e.g. B-PILOT/) before they're ever represented. Group by
+    # subtrees (e.g. b-pilot/) before they're ever represented. Group by
     # top-level path component (relative to the searched subtree) and
     # interleave round-robin so every group gets a fair share.
     start_rel_parts = start.relative_to(root).parts

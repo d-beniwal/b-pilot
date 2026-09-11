@@ -4,7 +4,7 @@ Tabs: Paths, Plans, Launch Session, Devices, Scan blocks, Queue Backend,
 Data Viewer, Appearance — one page each,
 selected via a left-hand list (`QListWidget` + `QStackedWidget`). A profile
 bar above the tabs lets you switch which on-disk profile
-(`B-PILOT/profiles/<name>/{default_config.json,active_config.json}`) you're
+(`b-pilot/profiles/<name>/{default_config.json,active_config.json}`) you're
 editing; see :mod:`config` for the profile lifecycle — `default_config.json`
 is the shared, git-committed baseline for that beamline, `active_config.json`
 is the live, per-workstation settings actually used day to day. Selecting a

@@ -29,7 +29,7 @@
 #   conda env create -n bpilot_mpe_dev -f environments/bpilot_mpe_dev.yml --solver=libmamba
 # activate:
 #   conda activate bpilot_mpe_dev
-# run the GUI (from B-PILOT/):
+# run the GUI (from b-pilot/):
 #   python launch.py
 
 name: bpilot_mpe_dev

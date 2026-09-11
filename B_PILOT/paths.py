@@ -213,7 +213,7 @@ def _find_bluesky_root(start: str) -> str:
     """Walk up from ``start`` to the ``mpe_bluesky`` Bluesky root (see
     :func:`_mpe_root_error`).
 
-    Falls back to two levels above the GUI (the ``<root>/B-PILOT/B_PILOT``
+    Falls back to two levels above the GUI (the ``<root>/b-pilot/B_PILOT``
     layout) if no marker is found, so the GUI still works before the project
     is fully in place.
     """
@@ -225,7 +225,7 @@ def _find_bluesky_root(start: str) -> str:
         if parent == cur:          # reached the filesystem root — stop
             break
         cur = parent
-    return os.path.dirname(BUNDLE_DIR)   # fallback: <root>/B-PILOT/B_PILOT
+    return os.path.dirname(BUNDLE_DIR)   # fallback: <root>/b-pilot/B_PILOT
 
 
 def _read_json_quiet(path: str) -> dict:

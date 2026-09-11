@@ -46,3 +46,4 @@ scripts/
 # Draft manuscript (LaTeX source + build artifacts) about B-PILOT/AutoPILOT —
 # working writing material, not part of the software repo.
 /paper/
+/tmp/

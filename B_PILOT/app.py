@@ -1,6 +1,6 @@
 """Application entry point for the B-PILOT Qt plan-runner GUI.
 
-Run it (from the ``B-PILOT/`` directory) via the top-level launcher::
+Run it (from the ``b-pilot/`` directory) via the top-level launcher::
 
     conda activate bpilot_mpe_dev
     python launch.py
