@@ -1,4 +1,4 @@
-# bpilot_mpe_dev — BEAMLINE environment for B-PILOT (GUI + AutoPILOT + kernel)
+# bpilot-mpe — BEAMLINE environment for B-PILOT (GUI + AutoPILOT + kernel)
 # =====================================================================
 # This is the BEAMLINE-capable variant: everything needed to run B-PILOT
 # fully on the beamline workstation, including the embedded kernel's
@@ -26,13 +26,13 @@
 # pyepics + epics-base.
 #
 # create (on the beamline workstation, on the APS subnet):
-#   conda env create -n bpilot_mpe_dev -f environments/bpilot_mpe_dev.yml --solver=libmamba
+#   conda env create -n bpilot-mpe -f environments/bpilot-mpe.yml --solver=libmamba
 # activate:
-#   conda activate bpilot_mpe_dev
+#   conda activate bpilot-mpe
 # run the GUI (from b-pilot/):
 #   python launch.py
 
-name: bpilot_mpe_dev
+name: bpilot-mpe
 
 channels:
   # apsu first: gives an epics-base compatible with pyepics (see pip section)

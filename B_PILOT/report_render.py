@@ -1,7 +1,7 @@
 """Render the report's Markdown as themed HTML for a ``QTextBrowser``.
 
 **Why a hand-rolled renderer rather than a Markdown library.** The beamline
-deployment environment (``environments/bpilot_mpe_dev.yml``) carries no
+deployment environment (``environments/bpilot-mpe.yml``) carries no
 Markdown dependency, and this project has already paid once for adding a
 package casually -- the 2026-08-10 pip-Qt incident, where pip's PyQt5 wheels
 broke GUI launch on redwood outright. A renderer that only has to handle the
