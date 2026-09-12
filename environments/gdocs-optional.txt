@@ -1,10 +1,10 @@
 # OPTIONAL -- only for the Google Docs report backend (B_PILOT/report_gdocs.py).
 #
-# Deliberately NOT in bpilot_mpe_dev.yml. B-PILOT runs perfectly well without
+# Deliberately NOT in bpilot-mpe.yml. B-PILOT runs perfectly well without
 # these: the backend is simply not offered and Configuration says why. Install
 # them only on a machine that will actually publish to Google Docs:
 #
-#     conda activate bpilot_mpe_dev
+#     conda activate bpilot-mpe
 #     pip install -r environments/gdocs-optional.txt
 #
 # DO NOT install these on redwood until the workflow is proven on a

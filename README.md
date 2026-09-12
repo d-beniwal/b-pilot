@@ -37,7 +37,7 @@ time.
   a **Google Doc** — no hosting needed, but readers refresh rather than watch,
   updates are held to one every 30 s, and Drive keeps earlier revisions of
   what was published (so hiding an entry is not retroactive there); figures
-  are carried into the document. See `docs/GDOCS_SETUP.md`. A workstation
+  are carried into the document. See `documents/GDOCS_SETUP.md`. A workstation
   with no route to the internet at all can instead write to a **shared
   outbox** and let a relay on a machine that does have internet publish from
   there — see `report_relay/README.md`.
@@ -49,15 +49,15 @@ time.
 ## Requirements
 
 A PyQt5 + Bluesky/ophyd environment. The environment this was developed and
-verified against ships with this repo at `environments/bpilot_mpe_dev.yml`
+verified against ships with this repo at `environments/bpilot-mpe.yml`
 (PyQt5, qtconsole, ipykernel, bluesky, ophyd, databroker, queueserver, etc.,
 python 3.11) — the beamline-capable variant, including `epics-base`/`hklpy`/
 `aps-dm-api` so `instrument.collection` fully imports on the beamline
 workstation. Create it with:
 
 ```bash
-conda env create -f environments/bpilot_mpe_dev.yml
-conda activate bpilot_mpe_dev
+conda env create -f environments/bpilot-mpe.yml
+conda activate bpilot-mpe
 ```
 
 ### Running against the beamline runtime env instead
@@ -65,7 +65,7 @@ conda activate bpilot_mpe_dev
 If you'd rather run B-PILOT inside the beamline's existing Bluesky env
 (`environment_2024_1.yml` in the parent workspace, the one the queueserver
 and `instrument.collection` actually run under) rather than
-`bpilot_mpe_dev`, it's missing one package the GUI needs:
+`bpilot-mpe`, it's missing one package the GUI needs:
 
 - **`qtconsole`** (pulls in `QtPy`) — powers the embedded IPython console
   (`B_PILOT/console_panel.py`). `environment_2024_1.yml` only installs
