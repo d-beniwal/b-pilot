@@ -1,31 +1,25 @@
-"""Mirror the experiment report to a remote, read-only web viewer.
+"""Mirror the experiment report to a remote, read-only copy.
 
 Collaborators who are not sitting at the beamline cannot see the report at all
 today; the only sharing mechanism is an Export that is stale the moment it is
-written. This module pushes the report *outward* to a small service the user
-hosts (see ``report_server/`` in this repo), where anyone holding an
-unguessable link can watch it update live.
+written. This module pushes the report *outward* to wherever the configured
+sink (see :mod:`report_sinks`) publishes it -- a Google Doc by default, or a
+shared outbox for a workstation with no route to the internet.
 
 The direction of travel is the whole security model. **Nothing is ever
-accepted from the network** -- this module only ever makes outbound requests,
-the workstation opens no port, and the service's reader-facing routes are
-GET-only and take no input. A remote viewer cannot reach the instrument even in
+accepted from the network** -- this module only ever makes outbound requests
+or writes to local/shared storage; the workstation opens no port and accepts
+nothing in return. A remote reader cannot reach the instrument even in
 principle, which is a property of the shape rather than of a setting.
 
-**Three conditions arm it, not one** (see :func:`enabled`):
-
-* ``report_sync_enabled`` -- the profile opts in;
-* ``report_sync_url`` -- the profile names a service;
-* ``BPILOT_REPORT_SYNC_TOKEN`` -- *this machine's environment* carries a push
-  token.
-
-The env var is not merely authentication. ``profiles/*/active_config.json`` is
-committed to git and the beamline runs on shared accounts, so a flag alone
-would arm every checkout of that profile -- a colleague's workstation, a dev
-laptop -- for a service they never chose. Requiring something that lives only
-in the environment makes the committed flag harmless everywhere it was not
-intended, and it is the same reasoning (and the same ``~/.bashrc`` line) as
-``ARGO_API_KEY`` in ``.context/DEPLOY.md``.
+**What arms it is delegated to the sink** (see :func:`enabled`), and always
+includes something that lives only in *this machine's environment*, never in
+the committed profile. ``profiles/*/active_config.json`` is committed to git
+and the beamline runs on shared accounts, so a flag alone would arm every
+checkout of that profile -- a colleague's workstation, a dev laptop -- for a
+target it never chose. Requiring something env-only makes the committed flag
+harmless everywhere it was not intended, and it is the same reasoning (and the
+same ``~/.bashrc`` line) as ``ARGO_API_KEY`` in ``.context/DEPLOY.md``.
 
 Even fully armed, this publishes nothing until the user shares a *specific*
 experiment (:func:`share`). :func:`report_views.get_view` returning ``None`` is
@@ -83,10 +77,11 @@ widget, so the whole module is driveable from a test with ``start=False``.
 **Where it publishes to lives in :mod:`report_sinks`.** This module owns *when*
 -- the poll, the debounce, the digest short-circuit, the backoff, the status --
 and delegates *where* to a sink chosen by ``report_sync_backend``. The four
-outcome constants are the seam; see that module's docstring. A second target
-(Google Docs) exists because publishing the HTTP service needs a host, TLS and
-egress that a beamline may not have, and it trades live updates and the
-instant-hide guarantee for needing no hosting at all.
+outcome constants are the seam; see that module's docstring. Google Docs needs
+no hosting at all, which is why it is the default; the shared-outbox sink
+exists on top of that for a beamline workstation with no route to the internet
+at all -- it writes locally and a relay on a machine that does have internet
+does the actual publishing.
 
 One caveat on "no Qt": :mod:`report_images`, imported here to resolve figure
 paths, imports PyQt5, so this module is not importable in a bare interpreter
@@ -114,16 +109,6 @@ from .report_sinks import OK as _OK
 from .report_sinks import REVOKED as _REVOKED
 from .report_sinks import TRANSIENT as _TRANSIENT
 
-# Re-exported, not redefined: ``config_dialog`` and ``report_panel`` both name
-# ``report_sync.TOKEN_ENV`` / ``push_token()`` / ``service_url()`` when telling
-# the user which arming condition is missing, and those call sites should not
-# have to know that the transport moved into :mod:`report_sinks`.
-SCHEMA = sinks.SCHEMA
-TOKEN_ENV = sinks.TOKEN_ENV
-CAFILE_ENV = sinks.CAFILE_ENV
-push_token = sinks.push_token
-service_url = sinks.service_url
-
 _TICK_S = 2.0            # worker wake interval when nothing is queued
 _QUIET_S = 2.0           # trailing debounce: collapse a burst of edits into one push
 _BACKOFF_S = (5, 10, 20, 40, 60)
@@ -134,12 +119,12 @@ _AUTH_BACKOFF_S = 300.0  # a bad token is not transient -- do not hammer it
 def enabled() -> bool:
     """Whether sync is armed on *this machine*, per the configured backend.
 
-    Delegated to the sink because the conditions differ by target: the HTTP
-    service needs a URL and a push token, while Google Docs needs client
-    credentials and a connected account. What does *not* differ is that at
-    least one of them always lives in the environment rather than the profile
-    -- see the module docstring on why the committed flag alone must never be
-    enough to arm a checkout.
+    Delegated to the sink because the conditions differ by target: Google Docs
+    needs client credentials and a connected account, while the outbox needs a
+    reachable shared-folder path. What does *not* differ is that at least one
+    of them always lives in the environment rather than the profile -- see the
+    module docstring on why the committed flag alone must never be enough to
+    arm a checkout.
     """
     return sinks.get_sink().enabled()
 
@@ -651,9 +636,9 @@ def rotate(beamline: str, experiment: str) -> str:
     """Retire the current link and mint a new one for the same experiment.
 
     What "a new link" *is* depends on the target, and the panel's wording has
-    to match: the HTTP service keeps one stored document and mints a new
-    secret for it, while a Google Doc's URL is its file id, so the only way to
-    kill a link is to publish into a new document and un-share the old one.
+    to match: a Google Doc's URL is its file id, so the only way to kill a
+    link is to publish into a new document and un-share the old one; the
+    outbox asks the relay to do the equivalent on its target.
     """
     sink = sinks.get_sink()
     view = report_views.rotate_view(beamline, experiment)

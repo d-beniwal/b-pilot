@@ -33,15 +33,14 @@ time.
   experiment report so collaborators off-site can follow it. B-PILOT only ever
   pushes *outward*; the workstation opens no port, so a remote reader has no
   access to it or to the instrument. Off by default and per-experiment opt-in,
-  and it additionally requires a credential in the environment. Two targets,
-  chosen in Configuration → Reports:
-  - **a viewer service you host** (`report_server/`) — genuinely live, and
-    hiding an entry takes its figures offline instantly. Needs a host and TLS;
-    see `report_server/README.md`.
-  - **a Google Doc** — no hosting at all, but readers refresh rather than watch,
-    updates are held to one every 30 s, and Drive keeps earlier revisions of
-    what was published (so hiding an entry is not retroactive there). Figures
-    are carried into the document; see `docs/GDOCS_SETUP.md`.
+  and it additionally requires a credential in the environment. Published as
+  a **Google Doc** — no hosting needed, but readers refresh rather than watch,
+  updates are held to one every 30 s, and Drive keeps earlier revisions of
+  what was published (so hiding an entry is not retroactive there); figures
+  are carried into the document. See `docs/GDOCS_SETUP.md`. A workstation
+  with no route to the internet at all can instead write to a **shared
+  outbox** and let a relay on a machine that does have internet publish from
+  there — see `report_relay/README.md`.
 - **Configurable plan scope** — a Configuration dialog controls which
   directory is scanned for plans, which files are even shown in the file
   browser ("Plan visibility," with select-all/deselect-all), and what startup

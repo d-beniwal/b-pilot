@@ -1,20 +1,14 @@
-"""Per-beamline store of the *view tokens* that address a shared report.
+"""Per-beamline store of the *view records* that address a shared report.
 
-One experiment that has been shared has one **view**: a short, non-secret
-``view_id`` (6 characters) plus a long ``secret`` (32 characters, 192 bits of
-entropy). The remote URL is
-``<service>/r/<view_id>/<secret>``, and holding that URL is the whole of the
-remote reader's authority -- there is no login (see :mod:`report_sync` for why
-that is the right shape here, and for the caveats a bearer URL carries).
-
-**Why the token is split in two.** The obvious design puts one long secret in
-the path. That secret then lands in the service's access log on every request,
-in any reverse proxy's log, and in the ``Referer`` of anything the page links
-out to. Splitting it means logs and identity can use ``view_id`` -- which
-reveals nothing and is stable across a rotation -- while only ``secret`` is
-sensitive. Rotating a link keeps ``view_id`` and mints a new ``secret``, so the
-service can revoke the old URL without losing track of which experiment the
-view belongs to.
+One experiment that has been shared has one **view**: a ``view_id`` plus a
+``secret``. This split (and the bearer-URL model it enabled) was designed for
+a self-hosted viewer service that no longer exists in this repo -- the two
+remaining sinks, Google Docs and the outbox, each mint their own address
+(``gdoc_id`` / the relay's published link) and neither reads ``secret``
+today. It stays part of the record because ``view_id`` is still the stable
+per-experiment key both sinks store their own fields against, and rotating it
+alongside ``secret`` is still the generic "the old link should stop working"
+signal a sink's :meth:`~report_sinks.Sink.rotate_target` reacts to.
 
 **Sharing is opt-in, per experiment.** A view exists only once the user has
 pressed Share on that experiment; :func:`get_view` returning ``None`` is how
@@ -213,16 +207,3 @@ def forget_view(beamline: str, experiment: str) -> dict | None:
         return dict(removed) if isinstance(removed, dict) else None
 
     return _mutate(beamline, _do)
-
-
-def view_url(base_url: str, view: dict | None) -> str:
-    """Reader-facing URL for `view`, or ``""`` if there isn't one.
-
-    The trailing slash is load-bearing, not cosmetic. The report's figures are
-    referenced relatively (``figures/fig_x.png``, so that an exported ``.md``
-    also opens correctly); without the slash a browser resolves those against
-    the *parent* of the secret and every image 404s.
-    """
-    if not (base_url and view and view.get("view_id") and view.get("secret")):
-        return ""
-    return f"{base_url.rstrip('/')}/r/{view['view_id']}/{view['secret']}/"

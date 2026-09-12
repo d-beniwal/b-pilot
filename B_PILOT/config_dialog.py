@@ -1331,27 +1331,17 @@ class ConfigDialog(QtWidgets.QDialog):
             self._report_sync_backend.addItem(text, value)
         self._report_sync_backend.setToolTip(
             "Where the report is published.\n\n"
-            "Viewer service: a small web service you host (report_server/ in this\n"
-            "repo). The only genuinely live option, and the only one where hiding\n"
-            "an entry takes its figures offline instantly. Needs a host and TLS.\n\n"
-            "Google Doc: no hosting at all, but readers must refresh, updates are\n"
-            "slower, and Drive keeps old revisions of what you published."
+            "Google Doc: no hosting needed, but readers must refresh, updates are\n"
+            "held to one every 30 s, and Drive keeps old revisions of what you\n"
+            "published.\n\n"
+            "Shared folder: for a workstation with no route to the internet at\n"
+            "all. Writes to a shared folder and a relay on a machine that does\n"
+            "have internet (report_relay/ in this repo) publishes it to Google\n"
+            "Docs from there."
         )
         self._report_sync_backend.currentIndexChanged.connect(self._on_report_backend_changed)
         backend_row.addWidget(self._report_sync_backend, 1)
         card.body.addLayout(backend_row)
-
-        url_row = QtWidgets.QHBoxLayout()
-        url_row.addWidget(S.LabelRight("Service URL:"))
-        self._report_sync_url = QtWidgets.QLineEdit()
-        self._report_sync_url.setPlaceholderText("https://reports.example.anl.gov")
-        self._report_sync_url.setToolTip(
-            "Base URL of the viewer service (see report_server/README.md in this\n"
-            "repo). A beamline fact, so it is saved into the profile."
-        )
-        url_row.addWidget(self._report_sync_url, 1)
-        self._report_url_row = url_row
-        card.body.addLayout(url_row)
 
         # Google-only: connect an account, and optionally pin a Drive folder.
         self._report_gdocs_row = QtWidgets.QHBoxLayout()
@@ -1416,7 +1406,6 @@ class ConfigDialog(QtWidgets.QDialog):
         from B_PILOT import report_sinks
 
         names = {
-            "http": "Viewer service you host (live)",
             "gdocs": "Google Doc (no hosting needed)",
             "outbox": "Shared folder — a relay publishes it (no internet needed)",
         }
@@ -1424,19 +1413,13 @@ class ConfigDialog(QtWidgets.QDialog):
 
     def _report_backend(self) -> str:
         data = self._report_sync_backend.currentData()
-        return data or "http"
+        return data or "gdocs"
 
     def _on_report_backend_changed(self, *_a) -> None:
         """Show only the fields the chosen target actually uses."""
         backend = self._report_backend()
         gdocs = backend == "gdocs"
         on = self._report_sync_enabled.isChecked()
-        http = backend == "http"
-        for i in range(self._report_url_row.count()):
-            item = self._report_url_row.itemAt(i).widget()
-            if item is not None:
-                item.setVisible(http)
-                item.setEnabled(on)
         for layout in (self._report_gdocs_row, self._report_gdocs_folder_row):
             for i in range(layout.count()):
                 item = layout.itemAt(i).widget()
@@ -1486,7 +1469,6 @@ class ConfigDialog(QtWidgets.QDialog):
         `_on_queue_backend_changed`).
         """
         for widget in (
-            self._report_sync_url,
             self._report_sync_interval,
             self._report_sync_backend,
             self._report_gdocs_connect,
@@ -1504,8 +1486,8 @@ class ConfigDialog(QtWidgets.QDialog):
         and nothing happened", with nowhere to look.
         """
         from B_PILOT import report_gdocs
+        from B_PILOT import report_outbox
         from B_PILOT import report_sinks
-        from B_PILOT import report_sync
 
         gdocs = self._report_backend() == "gdocs"
         self._report_sync_note.setText(self._report_sync_note_text(gdocs))
@@ -1520,7 +1502,7 @@ class ConfigDialog(QtWidgets.QDialog):
                 missing = (
                     "the Google client libraries are not installed here "
                     f"({report_sinks.unavailable_reason('gdocs')}). Publishing will "
-                    "fall back to the viewer service."
+                    "fall back to the shared outbox."
                 )
             elif not report_gdocs.credentials_path():
                 missing = (
@@ -1531,14 +1513,16 @@ class ConfigDialog(QtWidgets.QDialog):
             elif not report_gdocs.connected():
                 missing = "no Google account is connected yet — press Connect above."
         else:
-            if not report_sync.push_token():
+            root = report_outbox.outbox_root()
+            if not root:
                 missing = (
-                    f"{report_sync.TOKEN_ENV} is not set in this process's "
-                    "environment, so nothing will be published. Export it and "
-                    "restart B-PILOT."
+                    f"{report_outbox.OUTBOX_ENV} is not set in this process's "
+                    "environment, so nothing will be published. Export it (the "
+                    "path to a folder shared with the relay machine) and restart "
+                    "B-PILOT."
                 )
-            elif not self._report_sync_url.text().strip():
-                missing = "no service URL yet."
+            elif not os.path.isdir(root):
+                missing = f"{report_outbox.OUTBOX_ENV} points at {root!r}, which is not reachable right now."
 
         if missing:
             self._report_sync_status.setStyleSheet(f"color: {S.WARNING};")
@@ -1570,12 +1554,14 @@ class ConfigDialog(QtWidgets.QDialog):
                 + shared
             )
         return (
-            "The push token is read from the BPILOT_REPORT_SYNC_TOKEN environment "
+            "The outbox path is read from the BPILOT_REPORT_OUTBOX environment "
             "variable and is deliberately not a setting: profiles are committed and "
-            "shared between workstations, so a token stored here would start "
+            "shared between workstations, so a path stored here would start "
             "publishing from machines that never opted in. Export it on the same "
             "shell line that launches B-PILOT, as with ARGO_API_KEY.\n\n"
-            "Hiding an entry takes its figures offline immediately.\n\n" + shared
+            "This machine only writes to the shared folder — a relay on a machine "
+            "with internet access does the actual publishing, asynchronously, so "
+            "hiding an entry is not instant here.\n\n" + shared
         )
 
     # -- excluded-plan list helpers -----------------------------------------
@@ -1860,13 +1846,13 @@ class ConfigDialog(QtWidgets.QDialog):
         self._report_enabled.setChecked(bool(cfg.get("report_enabled", True)))
         self._report_title.setText(cfg.get("report_title", "") or "")
         self._report_sync_enabled.setChecked(bool(cfg.get("report_sync_enabled", False)))
-        self._report_sync_url.setText(cfg.get("report_sync_url", "") or "")
         self._report_sync_interval.setValue(int(cfg.get("report_sync_interval_s", 5) or 5))
         self._report_gdocs_folder.setText(cfg.get("report_gdocs_folder_id", "") or "")
         # An unavailable backend is not in the combo at all, so a profile naming
-        # one lands on the first entry (http) -- matching report_sinks'
-        # fall-back rather than silently keeping a target nothing can publish to.
-        want = cfg.get("report_sync_backend", "http") or "http"
+        # one lands on the first entry (alphabetically "gdocs", else "outbox")
+        # -- matching report_sinks' fall-back rather than silently keeping a
+        # target nothing can publish to.
+        want = cfg.get("report_sync_backend", "gdocs") or "gdocs"
         index = self._report_sync_backend.findData(want)
         self._report_sync_backend.setCurrentIndex(index if index >= 0 else 0)
         self._report_load_snapshots(cfg.get("report_snapshot_groups") or [])
@@ -1932,7 +1918,6 @@ class ConfigDialog(QtWidgets.QDialog):
             "report_title": self._report_title.text().strip(),
             "report_sync_enabled": self._report_sync_enabled.isChecked(),
             "report_sync_backend": self._report_backend(),
-            "report_sync_url": self._report_sync_url.text().strip(),
             "report_sync_interval_s": self._report_sync_interval.value(),
             "report_gdocs_folder_id": self._report_gdocs_folder.text().strip(),
             "report_excluded_plans": self._report_excluded_names(),

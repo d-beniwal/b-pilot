@@ -1,26 +1,22 @@
 """Publish the report as a Google Doc, shared read-only by link.
 
-The alternative to :class:`report_sinks.HttpSink` for people who have no host
-to run ``report_server/`` on. It needs no VM, no TLS, no reverse proxy and no
-inbound egress rule -- just a Google account -- and it gives that up in
-exchange for three things the HTTP service does better, all of which the UI
-has to say out loud rather than bury:
+The default publish target: it needs no VM, no TLS, no reverse proxy and no
+inbound egress rule -- just a Google account. Two trade-offs the UI has to say
+out loud rather than bury:
 
 * **It is not live.** A Doc is a document. Readers refresh; the push cadence is
   floored at :data:`MIN_INTERVAL_S` because every write costs a conversion and
   a permanent revision-history entry.
-* **Hiding an entry is no longer instant.** The HTTP service serves a figure
-  only while the current document names it, so hiding takes the pixels offline
-  immediately. Here the next push rewrites the document, but Drive keeps the
-  old revision, and a reader with the link can open revision history. This is
-  the sharpest difference between the two targets and the UI says so.
+* **Hiding an entry is not instant.** The next push rewrites the document, but
+  Drive keeps the old revision, and a reader with the link can open revision
+  history.
+* **The link is a Google sharing link**, with everything that implies about
+  who can forward it.
 
 Figures *do* publish: the payload is a ``.docx`` built by :mod:`report_docx`,
 whose images are real files inside the archive and survive Drive's conversion
 as inline pictures. See :data:`UPLOAD_MIME` for why not Markdown and why not
 themed HTML.
-* **The link is a Google sharing link**, with everything that implies about
-  who can forward it.
 
 **Scope is ``drive.file`` and must stay that way.** That grants access only to
 files this application itself created -- not the user's Drive. It is the
@@ -102,7 +98,7 @@ def credentials_path() -> str:
     """OAuth client-secrets file, from the environment.
 
     In the environment rather than the profile for the same reason
-    ``BPILOT_REPORT_SYNC_TOKEN`` is: profiles travel between workstations, so a
+    ``BPILOT_REPORT_OUTBOX`` is: profiles travel between workstations, so a
     profile that named a credentials file would arm every checkout of it.
     """
     return (os.environ.get(CREDENTIALS_ENV) or "").strip()

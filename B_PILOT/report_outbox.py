@@ -1,9 +1,10 @@
 """Publish the report into a shared folder, for a relay to pick up.
 
-For the case the other two backends cannot serve: a beamline workstation with
-**no route to the internet**. It writes the rendered report and its figures to
-a directory on shared storage; a daemon on a machine that *does* have internet
-(``report_relay/``) watches that directory and publishes to Google Docs.
+For the case the direct Google Docs backend cannot serve: a beamline
+workstation with **no route to the internet**. It writes the rendered report
+and its figures to a directory on shared storage; a daemon on a machine that
+*does* have internet (``report_relay/``) watches that directory and publishes
+to Google Docs.
 
 **Why an outbox rather than letting the relay read ``report.jsonl`` directly.**
 The raw record contains hidden entries and excluded plans; they are filtered
@@ -16,10 +17,8 @@ document**, and the relay ships only what it is handed. This is the same
 argument that made the wire format a rendered document rather than the JSONL,
 applied to a second transport.
 
-**The layout is deliberately identical to what ``report_server`` stores**
-(``report.md``, ``figures/``, ``meta.json`` per view). One relay implementation
-therefore serves both topologies -- fed by this sink over shared storage, or by
-the HTTP service over a network -- and moving between them later costs nothing.
+**The on-disk layout** is one directory per view (``report.md``, ``figures/``,
+``meta.json``), the shape ``report_relay/`` reads.
 
 **Nothing here needs a dependency.** Pure stdlib, so a beamline workstation
 running this backend needs no Google client libraries and no ``python-docx``:

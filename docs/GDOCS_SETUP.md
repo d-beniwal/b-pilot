@@ -1,24 +1,19 @@
 # Publishing the report to a Google Doc
 
-An alternative to hosting `report_server/`. B-PILOT creates one Google Doc per
-shared experiment, keeps it up to date, and shares it read-only by link. You
-need a Google account and nothing else — no VM, no TLS certificate, no reverse
-proxy, no firewall rule.
+B-PILOT creates one Google Doc per shared experiment, keeps it up to date, and
+shares it read-only by link. You need a Google account and nothing else — no
+VM, no TLS certificate, no reverse proxy, no firewall rule. This is the
+default and only *direct* publish target; a workstation with no route to the
+internet at all can instead write to a shared outbox and let a relay publish
+from there — see `report_relay/README.md`.
 
-## Decide whether you want this
+## What to expect
 
-| | Viewer service (`report_server/`) | Google Doc |
-|---|---|---|
-| Hosting | a host, TLS, a reverse proxy | none |
-| Updates | live, readers watch the page | on refresh, at most one per 30 s |
-| Hiding an entry | figures go offline instantly | applied on the next update; **Drive keeps earlier revisions** |
-| Figures | published | published (embedded in the document) |
-| Link | unguessable URL you control | Google sharing link |
-
-The revision-history point is the one to think hardest about. Anyone with the
-link can open the document's revision history, so something you published and
-then hid is still reachable. If that matters for your data, use the viewer
-service.
+Updates are on refresh, not live — readers see changes at most once every
+30 s. Hiding an entry is applied on the next update, but **Drive keeps earlier
+revisions** of the document, so anyone with the link can open its revision
+history and see what was there before. If that matters for your data, keep it
+in mind when deciding what to publish.
 
 ## How figures get there
 

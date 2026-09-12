@@ -204,40 +204,34 @@ DEFAULTS: dict = {
             ],
         }
     ],
-    # Mirror the report to a remote read-only web viewer, so collaborators who
-    # are not at the beamline can follow it live (see B_PILOT/report_sync.py
-    # and the report_server/ service in this repo). Outbound only: the
-    # workstation opens no port and accepts nothing from the network.
+    # Mirror the report to a remote read-only copy, so collaborators who are
+    # not at the beamline can follow it (see B_PILOT/report_sync.py). Outbound
+    # only: the workstation opens no port and accepts nothing from the network.
     #
-    # THESE TWO KEYS DO NOT ARM THE FEATURE ON THEIR OWN, and that is
-    # deliberate. Sync also requires BPILOT_REPORT_SYNC_TOKEN in the
-    # environment, which is not a config key and never will be. active_config.
-    # json is committed and the beamline runs on shared accounts, so a flag
-    # alone would start pushing from every checkout of this profile --
-    # a colleague's workstation, a dev laptop -- to a service nobody there
-    # chose. Requiring something that lives only in the environment makes the
-    # committed flag harmless wherever it wasn't intended. Same reasoning, and
-    # the same ~/.bashrc line, as ARGO_API_KEY (see .context/DEPLOY.md).
+    # THIS KEY DOES NOT ARM THE FEATURE ON ITS OWN, and that is deliberate.
+    # Sync also requires something that lives only in *this machine's*
+    # environment (a Google credential, or an outbox path), never a config
+    # key. active_config.json is committed and the beamline runs on shared
+    # accounts, so a flag alone would start pushing from every checkout of
+    # this profile -- a colleague's workstation, a dev laptop -- for a target
+    # nobody there chose. Requiring something env-only makes the committed
+    # flag harmless wherever it wasn't intended. Same reasoning, and the same
+    # ~/.bashrc line, as ARGO_API_KEY (see .context/DEPLOY.md).
     #
     # Even fully armed this publishes nothing until the user shares a specific
     # experiment from the Report panel; sharing is per experiment, never
     # per profile.
     "report_sync_enabled": False,
-    # Where the mirror publishes to: "http" (the report_server/ service in this
-    # repo), "gdocs" (a Google Doc shared read-only by link, see
-    # B_PILOT/report_gdocs.py), or "outbox" (write to a shared folder and let
-    # the report_relay/ daemon on an internet-connected machine publish it --
-    # for a workstation with no route out). The HTTP service is the only genuinely *live*
-    # target and the only one where hiding an entry takes its figures offline
-    # instantly; Google Docs needs no hosting at all, which is the whole reason
-    # it exists. An unavailable backend (the Google client libraries are not in
-    # the pinned beamline environment) falls back to "http" rather than
-    # erroring, so a profile naming it stays harmless on a machine without it.
-    "report_sync_backend": "http",
-    # Base URL of the viewer service, e.g. "https://reports.inside.anl.gov".
-    # A beamline fact like qs_zmq_control_addr, so it belongs in the committed
-    # profile -- unlike the push token, which never does. Unused by "gdocs".
-    "report_sync_url": "",
+    # Where the mirror publishes to: "gdocs" (a Google Doc shared read-only by
+    # link, see B_PILOT/report_gdocs.py) or "outbox" (write to a shared folder
+    # and let the report_relay/ daemon on an internet-connected machine
+    # publish it -- for a workstation with no route out). "gdocs" needs no
+    # hosting at all, which is why it is the default. An unavailable backend
+    # (the Google client libraries are not in the pinned beamline environment)
+    # falls back to "outbox" rather than erroring -- it is the one sink with
+    # no optional dependency to be missing -- so a profile naming "gdocs"
+    # stays harmless on a machine without those libraries.
+    "report_sync_backend": "gdocs",
     # Optional Drive folder id to create report documents in ("gdocs" only).
     # Blank means the account's My Drive root. Not a secret -- a folder id is
     # useless without access to the folder -- so the profile is the right home.

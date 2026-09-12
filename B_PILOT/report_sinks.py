@@ -3,10 +3,10 @@
 :mod:`report_sync` owns *when* to publish -- the poll, the debounce, the
 SHA-256 short-circuit, the backoff, the status the panel shows. This module
 owns *where*, and nothing else. The split exists because the two halves have
-completely different reasons to change: the scheduling half is finished and
-load-bearing, while the destination half grew a second implementation (Google
-Docs) the moment it turned out that publishing the HTTP service needs a VM,
-TLS and egress the beamline may not have.
+completely different reasons to change: the scheduling half is generic and
+load-bearing across every target, while the destination half has two
+independent shapes -- a Google Doc for a workstation with internet, and a
+shared-folder + relay for one without.
 
 **The outcome vocabulary is the seam.** Every sink call returns one of
 :data:`OK`, :data:`AUTH`, :data:`REVOKED`, :data:`TRANSIENT`, and that is the
@@ -35,26 +35,11 @@ stores whatever it needs to answer ``url()`` in the view record itself.
 """
 from __future__ import annotations
 
-import gzip
-import hashlib
-import json
-import os
-import ssl
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 
 from . import config
-from . import report_views
 
 SCHEMA = 1
-
-TOKEN_ENV = "BPILOT_REPORT_SYNC_TOKEN"
-CAFILE_ENV = "BPILOT_REPORT_SYNC_CAFILE"
-
-_DOC_TIMEOUT_S = 20.0
-_FIG_TIMEOUT_S = 60.0
 
 # Outcome classes for one publish attempt. See the module docstring: this
 # four-value vocabulary is the entire contract between a sink and the worker.
@@ -178,182 +163,6 @@ class Sink:
         return {}
 
 
-# ── HTTP: the report_server/ service ─────────────────────────────────────────
-
-def push_token() -> str:
-    return (os.environ.get(TOKEN_ENV) or "").strip()
-
-
-def service_url() -> str:
-    return (config.get("report_sync_url") or "").strip().rstrip("/")
-
-
-def _ssl_context() -> ssl.SSLContext:
-    """Default verification, optionally against a private CA.
-
-    An APS-internal VM with a self-signed certificate is the likely real snag
-    here. The answer is a CA file, from the environment alongside the push
-    token -- deliberately *not* a "skip verification" config key, which would
-    be a permanent hole added to dodge a one-time setup problem.
-    """
-    return ssl.create_default_context(cafile=os.environ.get(CAFILE_ENV) or None)
-
-
-def _classify(code: int) -> str:
-    if 200 <= code < 300:
-        return OK
-    if code in (401, 403):
-        return AUTH
-    if code in (404, 410):
-        return REVOKED
-    return TRANSIENT
-
-
-def _request(
-    method: str,
-    url: str,
-    *,
-    body: bytes | None = None,
-    headers: dict | None = None,
-    timeout: float,
-) -> tuple[str, str, bytes]:
-    """One HTTP attempt. Returns ``(outcome, message, payload)``; never raises.
-
-    ``timeout`` is always passed: ``urlopen`` defaults to *no* timeout, and a
-    hung socket would wedge this daemon thread silently and forever -- the same
-    shape as the queueserver GUI-freeze incident, just moved off the GUI thread.
-    """
-    req = urllib.request.Request(url, data=body, method=method)
-    for key, value in (headers or {}).items():
-        req.add_header(key, value)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
-            return OK, "", resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = (exc.read() or b"")[:200].decode("utf-8", "replace").strip()
-        except Exception:  # noqa: BLE001
-            pass
-        return _classify(exc.code), f"HTTP {exc.code}{': ' + detail if detail else ''}", b""
-    except urllib.error.URLError as exc:
-        return TRANSIENT, f"{exc.reason}", b""
-    except Exception as exc:  # noqa: BLE001 -- socket timeouts, TLS errors, bad URLs
-        return TRANSIENT, f"{type(exc).__name__}: {exc}", b""
-
-
-class HttpSink(Sink):
-    """The ``report_server/`` service: a snapshot POSTed to a host the user runs.
-
-    The only target that is genuinely *live* -- readers watch a page that polls
-    for a new digest -- and the only one where hiding an entry takes its pixels
-    offline instantly, because the service serves a figure only while the
-    stored document names it.
-    """
-
-    name = "http"
-    label = "report viewer service"
-
-    def enabled(self) -> bool:
-        return bool(config.get("report_sync_enabled") and service_url() and push_token())
-
-    def url(self, view: dict | None) -> str:
-        return report_views.view_url(service_url(), view)
-
-    def _auth_headers(self) -> dict:
-        return {"Authorization": f"Bearer {push_token()}"}
-
-    def known_figures(self, view: dict) -> dict | None:
-        outcome, _, payload = _request(
-            "GET",
-            f"{service_url()}/push/{view['view_id']}/figures",
-            headers=self._auth_headers(),
-            timeout=_DOC_TIMEOUT_S,
-        )
-        if outcome != OK:
-            return None  # ask again next cycle rather than re-uploading
-        try:
-            known = json.loads(payload.decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            return None
-        out = {}
-        for item in known if isinstance(known, list) else []:
-            name = (item or {}).get("name")
-            if name:
-                out[f"figures/{name}"] = item.get("sha256", "")
-        return out
-
-    def push_doc(self, view: dict, doc: Document) -> tuple[str, str]:
-        envelope = {
-            "schema": SCHEMA,
-            "view_id": view["view_id"],
-            "secret": view["secret"],
-            "beamline": doc.beamline,
-            "experiment": doc.experiment,
-            "title": doc.title,
-            "generated_at": _now(),
-            # render_markdown bakes beamline-local times with no marker, so an
-            # off-site reader would silently misread every timestamp. The page
-            # labels them with this rather than the document being rewritten.
-            "tz": _tz_name(),
-            "tz_offset_s": _tz_offset_s(),
-            "sha256": doc.digest,
-            "markdown": doc.markdown,
-            "figures": doc.figures,
-            "manifest": doc.manifest,
-        }
-        body = gzip.compress(json.dumps(envelope).encode("utf-8"))
-        outcome, message, _ = _request(
-            "POST",
-            f"{service_url()}/push/{view['view_id']}",
-            body=body,
-            headers={
-                **self._auth_headers(),
-                "Content-Type": "application/json",
-                "Content-Encoding": "gzip",
-            },
-            timeout=_DOC_TIMEOUT_S,
-        )
-        return outcome, message
-
-    def push_figure(self, view: dict, rel: str, blob: bytes) -> tuple[str, str]:
-        name = os.path.basename(rel)
-        outcome, message, _ = _request(
-            "POST",
-            f"{service_url()}/push/{view['view_id']}/figures/{name}",
-            body=blob,
-            headers={
-                **self._auth_headers(),
-                "Content-Type": "application/octet-stream",
-                "X-Content-Sha256": hashlib.sha256(blob).hexdigest(),
-            },
-            timeout=_FIG_TIMEOUT_S,
-        )
-        return outcome, (f"figure {name}: {message}" if message else "")
-
-    def revoke(self, view: dict) -> tuple[str, str]:
-        outcome, message, _ = _request(
-            "POST",
-            f"{service_url()}/push/{view['view_id']}/revoke",
-            body=b"",
-            headers=self._auth_headers(),
-            timeout=_DOC_TIMEOUT_S,
-        )
-        return outcome, message
-
-
-def _now() -> float:
-    return time.time()
-
-
-def _tz_name() -> str:
-    return time.strftime("%Z")
-
-
-def _tz_offset_s() -> int:
-    return -(time.altzone if time.daylight and time.localtime().tm_isdst else time.timezone)
-
-
 # ── selection ────────────────────────────────────────────────────────────────
 
 _SINKS: dict = {}
@@ -361,8 +170,14 @@ _gdocs_reason = "not checked yet"
 
 
 def _register_builtin() -> None:
-    if HttpSink.name not in _SINKS:
-        _SINKS[HttpSink.name] = HttpSink
+    # The outbox sink is pure stdlib, so it is always available -- which is
+    # the point: it is the universal fallback (a machine that can install
+    # nothing still publishes) and the backend for a beamline with no route
+    # to the internet at all.
+    if "outbox" not in _SINKS:
+        from .report_outbox import FileSink
+
+        _SINKS[FileSink.name] = FileSink
 
     # The Google sink is optional: its client libraries are not part of the
     # pinned beamline environment, and B-PILOT must run everywhere they are
@@ -372,13 +187,6 @@ def _register_builtin() -> None:
     # The module always imports; it is `available()` that reports whether the
     # libraries did. That split is what lets the Configuration page say *why*
     # the backend is missing instead of silently omitting it.
-    # The outbox sink is pure stdlib, so it is always available -- which is
-    # the point: it is the backend for a machine that can install nothing.
-    if "outbox" not in _SINKS:
-        from .report_outbox import FileSink
-
-        _SINKS[FileSink.name] = FileSink
-
     global _gdocs_reason
     if "gdocs" not in _SINKS:
         try:
@@ -400,16 +208,20 @@ def available() -> list:
 
 
 def backend_name() -> str:
-    """The configured backend, falling back to HTTP if it is unavailable.
+    """The configured backend, falling back to the outbox sink if unavailable.
 
     Falling back rather than erroring matters on a workstation that pulls a
     profile selecting ``gdocs`` without the client libraries installed: the
-    report simply keeps publishing the way it did before, and the
-    Configuration page says why.
+    report keeps publishing (to the shared outbox) instead of silently going
+    dark, and the Configuration page says why. ``outbox`` is the fallback
+    target rather than ``gdocs`` itself precisely because it is the one sink
+    with no optional dependency to be missing.
     """
     _register_builtin()
-    want = (config.get("report_sync_backend") or HttpSink.name).strip()
-    return want if want in _SINKS else HttpSink.name
+    from .report_outbox import FileSink
+
+    want = (config.get("report_sync_backend") or FileSink.name).strip()
+    return want if want in _SINKS else FileSink.name
 
 
 def get_sink(name: str | None = None) -> Sink:

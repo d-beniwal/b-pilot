@@ -103,9 +103,10 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             )
         )
         # Remote mirroring. The whole cluster stays hidden unless sync is armed
-        # on this machine (profile flag + service URL + BPILOT_REPORT_SYNC_TOKEN
-        # in the environment), so a workstation that never opted in shows no
-        # trace of the feature -- see report_sync.enabled().
+        # on this machine (a profile flag plus something backend-specific in
+        # the environment -- a Google credential, or an outbox path), so a
+        # workstation that never opted in shows no trace of the feature -- see
+        # report_sync.enabled().
         self._share_btn = self._button(
             "🌐 Share…", "Publish a read-only, live copy of this report.", self._on_share
         )
@@ -783,10 +784,6 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         nothing happened, and "it needs three things" is not a useful answer
         unless it also says which one is absent.
         """
-        try:
-            from . import report_sync
-        except Exception:  # noqa: BLE001
-            return
         from B_PILOT import report_sinks
 
         missing = []
@@ -803,21 +800,21 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             if not report_gdocs.connected():
                 missing.append("• a connected Google account — Configuration → Reports → Connect")
         else:
-            if not report_sync.service_url():
-                missing.append("• Configuration → Reports → the viewer service URL")
-            if not report_sync.push_token():
+            from B_PILOT import report_outbox
+
+            if not report_outbox.outbox_root():
                 missing.append(
-                    f"• the {report_sync.TOKEN_ENV} environment variable, exported before\n"
-                    "  B-PILOT starts (add it to the same shell line that launches the GUI)"
+                    f"• the {report_outbox.OUTBOX_ENV} environment variable, exported before\n"
+                    "  B-PILOT starts (it names a folder shared with the relay machine)"
                 )
         QtWidgets.QMessageBox.information(
             self,
             "Remote sharing is not set up",
-            "Sharing needs all three of these, and this machine is missing:\n\n"
+            "Sharing needs both of these, and this machine is missing:\n\n"
             + "\n".join(missing)
-            + "\n\nThe token deliberately lives in the environment rather than in the\n"
-            "profile: profiles are shared between workstations, and a token in one\n"
-            "would start publishing from machines that never opted in.",
+            + "\n\nThe credential deliberately lives in the environment rather than in\n"
+            "the profile: profiles are shared between workstations, and one stored\n"
+            "there would start publishing from machines that never opted in.",
         )
 
     def _start_share(self, sync) -> None:
@@ -863,12 +860,18 @@ class ReportDockWidget(QtWidgets.QDockWidget):
 
         return report_sinks.backend_name() == "gdocs"
 
+    @staticmethod
+    def _is_outbox() -> bool:
+        from B_PILOT import report_sinks
+
+        return report_sinks.backend_name() == "outbox"
+
     def _share_caveats(self) -> str:
         """What the reader gets, and what this particular target costs.
 
-        Worded per backend because the differences are not cosmetic: one is
-        live and takes hidden figures offline instantly, the other keeps
-        revisions of everything it ever published.
+        Worded per backend because the differences are not cosmetic: Google
+        Docs keeps revisions of everything it ever published, while the
+        outbox is relay-mediated and not instant.
         """
         common = (
             "Anyone with the link can read this report, without any access to this "
@@ -883,14 +886,17 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 "they refresh rather than live, and updates are held to one every "
                 "30 seconds.\n\nHiding an entry removes it on the next update, but "
                 "Google keeps earlier revisions of the document — anyone with the "
-                "link can open its revision history and see what was there before. "
-                "If that matters for this data, publish to a viewer service instead."
+                "link can open its revision history and see what was there before."
             )
-        return (
-            common
-            + "\n\nHiding an entry later also removes its figures from the remote "
-            "copy immediately."
-        )
+        if self._is_outbox():
+            return (
+                common
+                + "\n\nThis workstation only writes to a shared folder; a relay on "
+                "a machine with internet access publishes it to a Google Doc from "
+                "there. Publishing — and hiding an entry — happens whenever the "
+                "relay next runs, not instantly."
+            )
+        return common
 
     def _rotate_caveats(self) -> str:
         if self._is_gdocs():
@@ -900,6 +906,15 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 "but you will need to send the new link to everyone who should keep "
                 "it.\n\nThe old document stays in your Drive as a record of what "
                 "was published."
+            )
+        if self._is_outbox():
+            return (
+                "The current link stops working once the relay creates a new "
+                "document and takes its place — not instantly, since this "
+                "workstation only asks for a new one; the relay does the rest. "
+                "Anyone still using the old link loses access — which is the "
+                "point, but you will need to send the new link to everyone who "
+                "should keep it."
             )
         return (
             "The current link stops working and a new one takes its place. "
@@ -915,11 +930,17 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 "beamtime, so this removes access rather than deleting it. Nothing "
                 "on this workstation is affected."
             )
+        if self._is_outbox():
+            return (
+                "This workstation's copy is removed from the shared folder "
+                "immediately. The relay un-shares the published Google Doc the "
+                "next time it runs — if it cannot reach the folder or Google right "
+                "now, the old link may keep working until it can. Nothing on this "
+                "workstation is affected."
+            )
         return (
             "The remote copy is deleted and the link stops working.\n\n"
-            "If the service cannot be reached right now, the old link may keep "
-            "working until it can be — the status chip will say so rather than "
-            "claiming otherwise. Nothing on this workstation is affected."
+            "Nothing on this workstation is affected."
         )
 
     def _confirm(self, title: str, text: str) -> bool:
