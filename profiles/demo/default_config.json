@@ -1,0 +1,41 @@
+{
+  "bluesky_root": "demo_instrument",
+  "default_plan_file": "plans.py",
+  "visible_plan_files": [
+    "plans.py"
+  ],
+  "bluesky_startup": "import sys; sys.path.insert(0, \"src\"); from demo_instrument.startup import *",
+  "send_import_line": false,
+  "embedded_starter_script": "",
+  "keep_kernel_on_exit": true,
+  "beamline": "demo",
+  "use_screen": false,
+  "dm_experiment": "",
+  "setup_file": "",
+  "ui_scale": 1.0,
+  "theme": "light",
+  "font_family": "system",
+  "autopilot_enabled": false,
+  "midas_bridge_enabled": false,
+  "queue_backend": "native",
+  "device_search_paths": [
+    "src/demo_instrument/devices"
+  ],
+  "device_selection": {},
+  "device_category_overrides": {},
+  "plan_building_search_paths": [],
+  "suspender_search_paths": [],
+  "switch_to_search_paths": [],
+  "plan_building_blocks": {},
+  "databroker_catalog": "",
+  "databroker_uri": "",
+  "databroker_nexus_dir": "",
+  "viewer_export_fields": {
+    "summary": true,
+    "start_metadata": true,
+    "stop_metadata": true,
+    "notes": true,
+    "file_references": true,
+    "data_preview": false
+  }
+}

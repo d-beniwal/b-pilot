@@ -1,0 +1,9 @@
+# Placeholder config for the "demo" instrument.
+#
+# Its only job is to exist: B_PILOT.paths recognizes a "BITS-shaped" project
+# by the presence of both src/<pkg>/startup.py and src/<pkg>/configs/iconfig.yml
+# (see paths.py::_bits_package_dir). Its content is never read by B-PILOT --
+# the "demo" profile sets databroker_catalog explicitly, so the account/
+# catalog-name lookup that would otherwise consult this file never fires.
+#
+# DATABROKER_CATALOG: temp

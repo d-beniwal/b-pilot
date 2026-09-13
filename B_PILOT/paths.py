@@ -281,7 +281,15 @@ def _resolve_bluesky_root_override() -> tuple[str | None, str | None]:
     root = cfg.get("bluesky_root") or cfg.get("project_root")
     if not isinstance(root, str) or not root.strip():
         return None, None
-    candidate = os.path.normpath(os.path.abspath(os.path.expanduser(root.strip())))
+    expanded = os.path.expanduser(root.strip())
+    # A relative override resolves against BUNDLE_DIR (like resolve_starter()
+    # does for embedded_starter_script), not the process cwd -- this is what
+    # lets a bundled, portable stack (e.g. the "demo" profile's
+    # demo_instrument/) ship a relative bluesky_root straight in its tracked
+    # default_config.json instead of needing a per-workstation absolute-path
+    # override the way every real beamline profile does.
+    candidate = expanded if os.path.isabs(expanded) else _abs(BUNDLE_DIR, expanded)
+    candidate = os.path.normpath(candidate)
     reason = _bluesky_root_error(candidate)
     if reason:
         return None, f"The configured Bluesky root ({candidate}) was ignored: {reason}."
