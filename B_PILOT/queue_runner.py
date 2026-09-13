@@ -11,6 +11,11 @@ status updates **independently of the GUI** (even while it is detached/closed).
   transcript), waits for the reply, and writes back ``done``/``error``.
 * On error it pauses the queue (matches the interactive scheduler; a Ctrl-C /
   ``RunEngineInterrupted`` surfaces as an errored reply).
+* Once no ``waiting`` item is left, it pauses the queue too — draining the
+  queue always ends in ``paused``, never a `running` queue with nothing left
+  to do. This means a plan added later sits `waiting` until the user presses
+  Start/Resume again; it never starts on its own just because the queue
+  happened to be left `running`.
 * Exits when the kernel dies.
 
 No Qt, with one narrow exception: a `QCoreApplication` instance (no event
@@ -121,37 +126,42 @@ def main(argv: list[str]) -> int:
                 nxt = next(
                     (it for it in data["items"] if it["status"] == qs.WAITING), None
                 )
-                if nxt is not None:
-                    qs.set_item_status(beamline, nxt["id"], qs.RUNNING)
-                    detectors = nxt.get("midas_area_detectors") or []
-                    midas_bridge.notify_queued_sync(
-                        kc,
-                        detectors,
-                        config.get("midas_bridge_enabled"),
-                    )
-                    startup = det_startup_state.build_startup_commands(
-                        beamline, detectors
-                    )
-                    if startup:
-                        ok = _run_cell(kc, startup, cf)
-                        if ok is None:
-                            break  # kernel died mid-plan; leave item as-is and exit
-                        if not ok:
-                            qs.set_item_status(beamline, nxt["id"], qs.ERROR)
-                            qs.set_state(beamline, qs.PAUSED)  # stop on error
-                            continue
-                    # The stored command keeps its import line (the queue
-                    # panel displays it); whether it is sent is decided here,
-                    # at dispatch -- see command_builder.for_console.
-                    ok = _run_cell(kc, command_builder.for_console(nxt["command"]), cf)
+                if nxt is None:
+                    # Drained: nothing left to run. Go back to paused so a
+                    # plan added later doesn't start running on its own --
+                    # the user has to press Start/Resume again.
+                    qs.set_state(beamline, qs.PAUSED)
+                    continue
+                qs.set_item_status(beamline, nxt["id"], qs.RUNNING)
+                detectors = nxt.get("midas_area_detectors") or []
+                midas_bridge.notify_queued_sync(
+                    kc,
+                    detectors,
+                    config.get("midas_bridge_enabled"),
+                )
+                startup = det_startup_state.build_startup_commands(
+                    beamline, detectors
+                )
+                if startup:
+                    ok = _run_cell(kc, startup, cf)
                     if ok is None:
                         break  # kernel died mid-plan; leave item as-is and exit
-                    qs.set_item_status(
-                        beamline, nxt["id"], qs.DONE if ok else qs.ERROR
-                    )
                     if not ok:
+                        qs.set_item_status(beamline, nxt["id"], qs.ERROR)
                         qs.set_state(beamline, qs.PAUSED)  # stop on error
-                    continue
+                        continue
+                # The stored command keeps its import line (the queue
+                # panel displays it); whether it is sent is decided here,
+                # at dispatch -- see command_builder.for_console.
+                ok = _run_cell(kc, command_builder.for_console(nxt["command"]), cf)
+                if ok is None:
+                    break  # kernel died mid-plan; leave item as-is and exit
+                qs.set_item_status(
+                    beamline, nxt["id"], qs.DONE if ok else qs.ERROR
+                )
+                if not ok:
+                    qs.set_state(beamline, qs.PAUSED)  # stop on error
+                continue
             time.sleep(1.0)
     finally:
         try:
