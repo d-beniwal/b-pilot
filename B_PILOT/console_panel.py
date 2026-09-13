@@ -39,6 +39,7 @@ os.environ.setdefault("QT_API", "pyqt5")
 from PyQt5 import QtCore  # noqa: E402
 from PyQt5 import QtGui  # noqa: E402
 from PyQt5 import QtWidgets  # noqa: E402
+from qtconsole.ansi_code_processor import AnsiCodeProcessor  # noqa: E402
 from qtconsole.manager import QtKernelManager  # noqa: E402
 from qtconsole.rich_jupyter_widget import RichJupyterWidget  # noqa: E402
 
@@ -163,6 +164,12 @@ class ConsolePanel(QtWidgets.QWidget):
         # that raised, so a failed command is never reported as having run.
         self._pending_execs: dict[str, str] = {}
         self._errored_execs: set[str] = set()
+        # parent msg_id -> {"cursor": QTextCursor, "processor": AnsiCodeProcessor,
+        # "lines": [...], "row": int, "col": int} for an in-progress FOREIGN
+        # progress-bar redraw (queue_runner.py's dispatch) currently being
+        # collapsed into a single overwriting block -- see
+        # _handle_foreign_progress_stream.
+        self._progress_bars: dict[str, dict] = {}
 
         self._stack = QtWidgets.QStackedWidget()
         self._placeholder = QtWidgets.QLabel(_PLACEHOLDER)
@@ -468,6 +475,40 @@ class ConsolePanel(QtWidgets.QWidget):
         except Exception:  # noqa: BLE001  (older qtconsole without the trait)
             pass
 
+        # include_other_output above means a queue_runner.py-dispatched plan's
+        # progress bar (bluesky's TerminalProgressBar, which redraws with
+        # \r + \n + an ANSI cursor-up escape, exactly like a real terminal)
+        # gets displayed via qtconsole's "foreign client" append path, which
+        # resets its insertion cursor to just-before-our-idle-prompt on EVERY
+        # incoming chunk and disables \r's overwrite logic whenever that reset
+        # doesn't land on a bare newline -- see _handle_foreign_progress_stream
+        # for the full explanation. Net effect without this override: every
+        # progress-bar tick from a queued plan appends as a NEW line instead
+        # of overwriting the previous one. This bound-method override collapses
+        # exactly that case (foreign + contains "\r") ourselves; every other
+        # message shape (this widget's own execution, or foreign output with
+        # no "\r") falls straight through to qtconsole's original handling,
+        # unchanged.
+        self._progress_bars.clear()  # drop any cursors into the old jw's document
+        orig_handle_stream = jw._handle_stream
+
+        def _handle_stream_override(msg):
+            try:
+                content = msg.get("content", {}) or {}
+                text = content.get("text", "")
+                parent_id = msg.get("parent_header", {}).get("msg_id")
+                if "\r" not in text or jw.from_here(msg) or not parent_id:
+                    orig_handle_stream(msg)
+                    return
+                self._handle_foreign_progress_stream(jw, parent_id, msg, text)
+            except Exception:  # noqa: BLE001 -- never let a malformed message break the console
+                try:
+                    orig_handle_stream(msg)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        jw._handle_stream = _handle_stream_override
+
         # Track execution lifecycle so the scheduler can chain queued plans and
         # so we know when the kernel is busy.
         jw.executing.connect(self._on_jw_executing)
@@ -497,6 +538,102 @@ class ConsolePanel(QtWidgets.QWidget):
         self.jupyter_widget = jw
         self._stack.addWidget(jw)
         self._stack.setCurrentWidget(jw)
+
+    # ── Foreign progress-bar collapsing (see _wire_widget's override) ───────────
+
+    def _handle_foreign_progress_stream(self, jw, parent_id: str, msg, text: str) -> None:
+        """Collapse one \\r-bearing stream chunk from a FOREIGN client (a
+        queue_runner.py-dispatched plan's progress bar) into a single,
+        in-place-overwriting block, instead of qtconsole's default foreign-
+        output handling which would append it as a new line every time.
+        """
+        if not jw.include_output(msg):
+            return
+        jw.flush_clearoutput()
+        state = self._progress_bars.get(parent_id)
+        if state is None:
+            state = self._new_progress_region(jw)
+            self._progress_bars[parent_id] = state
+        self._feed_progress_text(state, text)
+        self._render_progress_region(jw, state)
+
+    @staticmethod
+    def _new_progress_region(jw) -> dict:
+        """Start a fresh collapsible block, anchored just before jw's idle
+        prompt, on its own clean line so the region-replace below never bleeds
+        into the prompt or into unrelated preceding output."""
+        doc = jw._control.document()
+        pos = jw._append_before_prompt_pos
+        if pos > 0 and doc.characterAt(pos - 1) != "\n":
+            nl_cursor = QtGui.QTextCursor(doc)
+            nl_cursor.setPosition(pos)
+            nl_cursor.insertText("\n")
+            pos = nl_cursor.position()
+        region_cursor = QtGui.QTextCursor(doc)
+        region_cursor.setPosition(pos)
+        region_cursor.setKeepPositionOnInsert(True)  # anchor stays put across replaces
+        return {
+            "cursor": region_cursor,
+            "processor": AnsiCodeProcessor(),
+            "lines": [""],
+            "row": 0,
+            "col": 0,
+        }
+
+    @staticmethod
+    def _feed_progress_text(state: dict, text: str) -> None:
+        """Replay bluesky TerminalProgressBar's escape subset (\\r, \\n,
+        ANSI cursor-up) against an in-memory screen buffer -- this is NOT a
+        general ANSI terminal emulator, just enough to track what a progress
+        bar's meter line(s) currently look like."""
+        processor, lines = state["processor"], state["lines"]
+        row, col = state["row"], state["col"]
+        for substring in processor.split_string(text):
+            for act in processor.actions:
+                if act.action == "carriage-return":
+                    col = 0
+                elif act.action == "newline":
+                    row += 1
+                    col = 0
+                    while len(lines) <= row:
+                        lines.append("")
+                elif act.action == "move" and act.unit == "line":
+                    if act.dir == "up":
+                        row = max(0, row - act.count)
+                    elif act.dir == "down":
+                        row += act.count
+                    while len(lines) <= row:
+                        lines.append("")
+                # erase/scroll/beep/backspace/cursor-visibility: bluesky's
+                # TerminalProgressBar never emits these -- ignored on purpose.
+            if substring:
+                while len(lines) <= row:
+                    lines.append("")
+                line = lines[row]
+                if col > len(line):
+                    line = line + " " * (col - len(line))
+                lines[row] = line[:col] + substring + line[col + len(substring):]
+                col += len(substring)
+        state["row"], state["col"] = row, col
+
+    @staticmethod
+    def _render_progress_region(jw, state: dict) -> None:
+        """Replace the document range this block owns (from its pinned start
+        cursor to the current before-prompt boundary) with the collapsed
+        screen state -- so the visible result is always the CURRENT state,
+        never an accumulation of every past tick."""
+        doc = jw._control.document()
+        start = state["cursor"].position()
+        end = jw._append_before_prompt_pos
+        if end < start:
+            return  # defensive: document rewound unexpectedly; skip this tick
+        work = QtGui.QTextCursor(doc)
+        work.setPosition(start)
+        work.setPosition(end, QtGui.QTextCursor.KeepAnchor)
+        work.beginEditBlock()
+        work.removeSelectedText()
+        work.insertText("\n".join(state["lines"]) + "\n")
+        work.endEditBlock()
 
     @staticmethod
     def _remember_connection_file(cf: str | None) -> None:
@@ -645,6 +782,16 @@ class ConsolePanel(QtWidgets.QWidget):
             if code.strip() and parent_id:
                 self._pending_execs[parent_id] = code
             return
+        if mtype == "status":
+            # Clean up _handle_foreign_progress_stream's per-execution state
+            # (see _wire_widget) -- checked BEFORE the _pending_execs guard
+            # below since a bare kernel starting/restarting status has no
+            # matching parent_id and would otherwise never reach this.
+            state = msg.get("content", {}).get("execution_state")
+            if state in ("starting", "restarting"):
+                self._progress_bars.clear()
+            elif state == "idle":
+                self._progress_bars.pop(parent_id, None)
         if parent_id not in self._pending_execs:
             return
         if mtype == "error":
