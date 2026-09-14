@@ -9,8 +9,8 @@ Maps the Bluesky RunEngine interrupt/recovery model onto buttons:
 * After a pause, the RunEngine's **four** recovery options appear as temporary
   buttons — ``RE.resume()`` / ``RE.stop()`` / ``RE.abort()`` / ``RE.halt()`` —
   sent to the console.  They hide again once one is chosen.  Stop/Abort/Halt
-  (never Resume) are always followed by the active profile's ``abort_cleanup()``
-  shortcut, if one is configured.
+  (never Resume) are always followed by ``RE(abort_cleanup())``, the active
+  profile's cleanup shortcut, if one is configured.
 
 When ``config.get("queue_backend") == "qs"``, a plan dispatched through the
 queue server (:mod:`qs_client`) is a second, independent RunEngine that can
@@ -44,7 +44,7 @@ from . import style as S
 _HOLD_MS = 1000  # press-and-hold threshold for a hard (immediate) halt
 
 # Recovery commands that end the run (Resume is excluded -- it isn't a
-# cleanup point) -- each is always followed by abort_cleanup(), if the
+# cleanup point) -- each is always followed by RE(abort_cleanup()), if the
 # active profile defines one. Console-kernel target only (see _recover).
 _CLEANUP_COMMANDS = {"RE.stop()", "RE.abort()", "RE.halt()"}
 
@@ -65,12 +65,15 @@ _QS_RECOVERY = {
 
 
 def _abort_cleanup_command() -> str | None:
-    """`from <module> import abort_cleanup` + a bare `abort_cleanup()` call,
+    """`from <module> import abort_cleanup` + `RE(abort_cleanup())`,
     resolved against the active profile's `switch_to_search_paths` (the same
     per-beamline shortcuts file that already holds its `switch_to_*` plans).
     `abort_cleanup` is deliberately excluded from that module's `__all__` (so
     it never shows up as a switch-to shortcut), which is why this looks it up
     with `plan_parser.file_defines_function` instead of `find_plan_specs`.
+    Every beamline's `abort_cleanup` is a plan (contains `yield from`), so a
+    bare `abort_cleanup()` call only builds a generator and runs nothing --
+    it must go through `RE(...)` like any other plan.
     Returns None if no configured search path defines it.
     """
     import_root = config.get("import_root")
@@ -78,7 +81,7 @@ def _abort_cleanup_command() -> str | None:
         abs_path = rel_path if os.path.isabs(rel_path) else os.path.join(_paths.BLUESKY_ROOT, rel_path)
         if P.file_defines_function(abs_path, "abort_cleanup"):
             module = P.file_to_module(abs_path, import_root)
-            return f"from {module} import abort_cleanup\nabort_cleanup()"
+            return f"from {module} import abort_cleanup\nRE(abort_cleanup())"
     return None
 
 
