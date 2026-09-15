@@ -102,6 +102,18 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                 "⤓ Export", "Save a standalone copy of this report.", self._on_export
             )
         )
+        # Remote mirroring. The whole cluster stays hidden unless sync is armed
+        # on this machine (a profile flag plus something backend-specific in
+        # the environment -- a Google credential, or an outbox path), so a
+        # workstation that never opted in shows no trace of the feature -- see
+        # report_sync.enabled().
+        self._share_btn = self._button(
+            "🌐 Share…", "Publish a read-only, live copy of this report.", self._on_share
+        )
+        header.addWidget(self._share_btn)
+        self._share_chip = QtWidgets.QLabel("")
+        self._share_chip.setStyleSheet(f"color:{S.MUTED};")
+        header.addWidget(self._share_chip)
         layout.addLayout(header)
 
         self._view = QtWidgets.QTextBrowser()
@@ -335,6 +347,9 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         self._timer.stop()
 
     def _poll(self) -> None:
+        # Before the subject guard: the share cluster must be able to hide
+        # itself even when no experiment is loaded.
+        self._refresh_share_chip()
         if not (self._beamline and self._experiment):
             return
         sources = rs.source_state(self._beamline, self._experiment)
@@ -684,6 +699,276 @@ class ReportDockWidget(QtWidgets.QDockWidget):
             )
             return
         self._append_placed(rs.IMAGE, dlg.after_id(), title=caption, **stored)
+
+    # ── remote mirroring ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _sync():
+        """The sync module, or ``None`` when the feature is switched off.
+
+        Gated on the config flag *before* importing so that a workstation with
+        sync off never even loads the module -- no thread, no socket, nothing
+        to prove absent. Callers must treat ``None`` as "feature not present".
+        """
+        if not config.get("report_sync_enabled"):
+            return None
+        try:
+            from . import report_sync
+            return report_sync
+        except Exception:  # noqa: BLE001 -- mirroring must never break the panel
+            return None
+
+    def _refresh_share_chip(self) -> None:
+        """Keep the share button and status chip in step with the worker.
+
+        Read-only: this reflects what the sync worker is doing, and never
+        drives it. The worker runs its own poll precisely so that closing this
+        dock does not stop the remote from updating.
+        """
+        sync = self._sync()
+        if sync is None or not sync.enabled():
+            self._share_btn.setVisible(False)
+            self._share_chip.setVisible(False)
+            return
+        self._share_btn.setVisible(True)
+        state = sync.state()
+        shared = bool(
+            self._beamline
+            and self._experiment
+            and sync.is_shared(self._beamline, self._experiment)
+        )
+        self._share_btn.setText("🌐 Sharing…" if shared else "🌐 Share…")
+        self._share_chip.setVisible(shared)
+        if not shared:
+            return
+
+        status = state.get("status")
+        colour, text = S.MUTED, "not pushed yet"
+        if status == "ok" and state.get("pushed_at"):
+            colour = S.SUCCESS
+            text = "live · " + time.strftime("%H:%M", time.localtime(state["pushed_at"]))
+        elif status == "pushing":
+            text = "pushing…"
+        elif status == "retrying":
+            colour, text = S.WARNING, "retrying…"
+        elif status == "auth_error":
+            colour, text = S.ERROR, "token rejected"
+        elif status == "revoked":
+            colour, text = S.ERROR, "link revoked"
+        elif status == "error":
+            colour, text = S.ERROR, "sync problem"
+        self._share_chip.setStyleSheet(f"color:{colour};")
+        self._share_chip.setText(f"🌐 {text}")
+        tip = [state.get("url") or "", "Read-only link — anyone who has it can read this report."]
+        if state.get("error"):
+            tip.append("")
+            tip.append(str(state["error"]))
+        self._share_chip.setToolTip("\n".join(t for t in tip if t is not None))
+
+    def _on_share(self) -> None:
+        if not (self._beamline and self._experiment):
+            return
+        sync = self._sync()
+        if sync is None or not sync.enabled():
+            self._explain_sync_off()
+            return
+        if sync.is_shared(self._beamline, self._experiment):
+            self._manage_share(sync)
+        else:
+            self._start_share(sync)
+
+    def _explain_sync_off(self) -> None:
+        """Say exactly which of the three conditions is missing.
+
+        This is the first place someone looks when they switched sync on and
+        nothing happened, and "it needs three things" is not a useful answer
+        unless it also says which one is absent.
+        """
+        from B_PILOT import report_sinks
+
+        missing = []
+        if not config.get("report_sync_enabled"):
+            missing.append("• Configuration → Reports → “Mirror this report to a remote viewer”")
+        if report_sinks.backend_name() == "gdocs":
+            from B_PILOT import report_gdocs
+
+            if not report_gdocs.credentials_path():
+                missing.append(
+                    f"• the {report_gdocs.CREDENTIALS_ENV} environment variable, exported\n"
+                    "  before B-PILOT starts (it names your Google OAuth client file)"
+                )
+            if not report_gdocs.connected():
+                missing.append("• a connected Google account — Configuration → Reports → Connect")
+        else:
+            from B_PILOT import report_outbox
+
+            if not report_outbox.outbox_root():
+                missing.append(
+                    f"• the {report_outbox.OUTBOX_ENV} environment variable, exported before\n"
+                    "  B-PILOT starts (it names a folder shared with the relay machine)"
+                )
+        QtWidgets.QMessageBox.information(
+            self,
+            "Remote sharing is not set up",
+            "Sharing needs both of these, and this machine is missing:\n\n"
+            + "\n".join(missing)
+            + "\n\nThe credential deliberately lives in the environment rather than in\n"
+            "the profile: profiles are shared between workstations, and one stored\n"
+            "there would start publishing from machines that never opted in.",
+        )
+
+    def _start_share(self, sync) -> None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Share this report")
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setText(f"Publish a live, read-only copy of “{self._experiment}”?")
+        box.setInformativeText(self._share_caveats())
+        box.setStandardButtons(QtWidgets.QMessageBox.Cancel)
+        share = box.addButton("Share", QtWidgets.QMessageBox.AcceptRole)
+        box.exec_()
+        if box.clickedButton() is not share:
+            return
+        url = sync.share(self._beamline, self._experiment)
+        self._show_link(url, "Sharing started")
+
+    def _manage_share(self, sync) -> None:
+        url = sync.view_url(self._beamline, self._experiment)
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Sharing")
+        box.setText(f"“{self._experiment}” is being mirrored.")
+        box.setInformativeText(url + "\n\nRead-only. Updates automatically.")
+        box.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        copy = box.addButton("Copy link", QtWidgets.QMessageBox.AcceptRole)
+        rotate = box.addButton("New link", QtWidgets.QMessageBox.ActionRole)
+        stop = box.addButton("Stop sharing", QtWidgets.QMessageBox.DestructiveRole)
+        box.addButton(QtWidgets.QMessageBox.Close)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is copy:
+            QtWidgets.QApplication.clipboard().setText(url)
+        elif clicked is rotate:
+            if self._confirm("Replace the link?", self._rotate_caveats()):
+                self._show_link(sync.rotate(self._beamline, self._experiment), "New link")
+        elif clicked is stop:
+            if self._confirm("Stop sharing?", self._stop_caveats()):
+                sync.stop_sharing(self._beamline, self._experiment)
+                self._refresh_share_chip()
+
+    @staticmethod
+    def _is_gdocs() -> bool:
+        from B_PILOT import report_sinks
+
+        return report_sinks.backend_name() == "gdocs"
+
+    @staticmethod
+    def _is_outbox() -> bool:
+        from B_PILOT import report_sinks
+
+        return report_sinks.backend_name() == "outbox"
+
+    def _share_caveats(self) -> str:
+        """What the reader gets, and what this particular target costs.
+
+        Worded per backend because the differences are not cosmetic: Google
+        Docs keeps revisions of everything it ever published, while the
+        outbox is relay-mediated and not instant.
+        """
+        common = (
+            "Anyone with the link can read this report, without any access to this "
+            "workstation.\n\nThe link is a key: whoever it is forwarded to keeps "
+            "access until you rotate or stop it. Hidden entries and excluded plans "
+            "are not published."
+        )
+        if self._is_gdocs():
+            return (
+                common
+                + "\n\nThis publishes to a Google Doc, so readers see updates when "
+                "they refresh rather than live, and updates are held to one every "
+                "30 seconds.\n\nHiding an entry removes it on the next update, but "
+                "Google keeps earlier revisions of the document — anyone with the "
+                "link can open its revision history and see what was there before."
+            )
+        if self._is_outbox():
+            return (
+                common
+                + "\n\nThis workstation only writes to a shared folder; a relay on "
+                "a machine with internet access publishes it to a Google Doc from "
+                "there. Publishing — and hiding an entry — happens whenever the "
+                "relay next runs, not instantly."
+            )
+        return common
+
+    def _rotate_caveats(self) -> str:
+        if self._is_gdocs():
+            return (
+                "A new Google Doc is created and the old one stops being shared. "
+                "Anyone still using the old link loses access — which is the point, "
+                "but you will need to send the new link to everyone who should keep "
+                "it.\n\nThe old document stays in your Drive as a record of what "
+                "was published."
+            )
+        if self._is_outbox():
+            return (
+                "The current link stops working once the relay creates a new "
+                "document and takes its place — not instantly, since this "
+                "workstation only asks for a new one; the relay does the rest. "
+                "Anyone still using the old link loses access — which is the "
+                "point, but you will need to send the new link to everyone who "
+                "should keep it."
+            )
+        return (
+            "The current link stops working and a new one takes its place. "
+            "Anyone still using the old one loses access — which is the point, "
+            "but you will need to send the new link to everyone who should keep it."
+        )
+
+    def _stop_caveats(self) -> str:
+        if self._is_gdocs():
+            return (
+                "The document stops being shared and the link stops working.\n\n"
+                "The document itself stays in your Drive — it is your record of the "
+                "beamtime, so this removes access rather than deleting it. Nothing "
+                "on this workstation is affected."
+            )
+        if self._is_outbox():
+            return (
+                "This workstation's copy is removed from the shared folder "
+                "immediately. The relay un-shares the published Google Doc the "
+                "next time it runs — if it cannot reach the folder or Google right "
+                "now, the old link may keep working until it can. Nothing on this "
+                "workstation is affected."
+            )
+        return (
+            "The remote copy is deleted and the link stops working.\n\n"
+            "Nothing on this workstation is affected."
+        )
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return (
+            QtWidgets.QMessageBox.question(
+                self,
+                title,
+                text,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            == QtWidgets.QMessageBox.Yes
+        )
+
+    def _show_link(self, url: str, title: str) -> None:
+        self._refresh_share_chip()
+        if not url:
+            return
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText("Anyone with this link can read the report:")
+        box.setInformativeText(url)
+        box.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        copy = box.addButton("Copy link", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton(QtWidgets.QMessageBox.Close)
+        box.exec_()
+        if box.clickedButton() is copy:
+            QtWidgets.QApplication.clipboard().setText(url)
 
     def _on_export(self) -> None:
         """Save a standalone copy -- PDF, Markdown, or self-contained HTML.

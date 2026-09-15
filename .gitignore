@@ -47,3 +47,7 @@ scripts/
 # working writing material, not part of the software repo.
 /paper/
 /tmp/
+
+# Working scratch space for in-progress explorations/drafts — not part of
+# the software repo.
+/scratch/

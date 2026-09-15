@@ -25,6 +25,7 @@
   "use_screen": true,
   "launch_mode": "embedded",
   "dm_experiment": "",
+  "experiment_data_root": "~/new_data",
   "setup_file": "exp_setup.yml",
   "script_run_mode": "screen",
   "ui_scale": 1.0,

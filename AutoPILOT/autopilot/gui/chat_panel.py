@@ -740,6 +740,7 @@ class ChatDockWidget(QtWidgets.QDockWidget):
             conversation_id=self._worker.conversation_id,
             turn_id=self._pending.turn_id if self._pending else "",
             action="added_to_report",
+            experiment=experiment,
         )
         # Cleared, not just greyed out: the guard at the top of this method is
         # then what makes a second insert impossible, rather than the button's
@@ -771,6 +772,7 @@ class ChatDockWidget(QtWidgets.QDockWidget):
             conversation_id=self._worker.conversation_id,
             turn_id=self._pending.turn_id,
             action="opened_in_form",
+            experiment=bpilot_config.as_dict().get("dm_experiment"),
         )
         self._append_note(
             f"Opened {template.gui_plan_name} in the form -- review the fields, "

@@ -11,9 +11,10 @@ stays tiny::
     {"ts": ..., "kind": "image", "file": "figures/fig_20260907_142530.png",
      "title": "Detector alignment", "w": 1440, "h": 900}
 
-and the pixels live beside it::
+and the pixels live beside it (see :mod:`experiment_history`'s module
+docstring for both layouts ``<experiment_dir>`` can resolve to)::
 
-    <session_dir>/<beamline>/experiments/<name>/figures/fig_....png
+    <experiment_dir>/figures/fig_....png
 
 **Cost is paid once, at ingest.** An image is downscaled to
 :data:`MAX_EDGE_PX` on its long edge and encoded as PNG, which is what

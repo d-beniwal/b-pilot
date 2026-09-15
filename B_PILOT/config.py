@@ -117,6 +117,15 @@ DEFAULTS: dict = {
     "beamline": "20ide",                  # identifies the one-kernel-per-beamline session
     "use_screen": True,                   # host the kernel in a named screen session
     "session_dir": _paths.SESSION_DIR_DEFAULT,  # fixed per-beamline runtime paths
+    # Optional root under which this beamline's EXPERIMENT-specific records
+    # (kernel history, the report + its figures, AutoPILOT chat logs) are
+    # filed alongside the real experiment data, as
+    # ``<this>/<experiment>/b_pilot/{report,autopilot}/`` -- see
+    # experiment_history.experiment_dir(). Blank (the default) keeps today's
+    # layout, everything under session_dir. A shared beamline fact meant to
+    # be committed per profile (like databroker_catalog), not a per-
+    # workstation override -- deliberately NOT in _WORKSTATION_KEYS.
+    "experiment_data_root": "",
     # Starter for the embedded kernel: activates env + records experiment,
     # then starts a connectable ipykernel. Empty = launch a bare ipykernel
     # directly (no env activation / collection import).
@@ -190,6 +199,43 @@ DEFAULTS: dict = {
             ],
         }
     ],
+    # Mirror the report to a remote read-only copy, so collaborators who are
+    # not at the beamline can follow it (see B_PILOT/report_sync.py). Outbound
+    # only: the workstation opens no port and accepts nothing from the network.
+    #
+    # THIS KEY DOES NOT ARM THE FEATURE ON ITS OWN, and that is deliberate.
+    # Sync also requires something that lives only in *this machine's*
+    # environment (a Google credential, or an outbox path), never a config
+    # key. active_config.json is committed and the beamline runs on shared
+    # accounts, so a flag alone would start pushing from every checkout of
+    # this profile -- a colleague's workstation, a dev laptop -- for a target
+    # nobody there chose. Requiring something env-only makes the committed
+    # flag harmless wherever it wasn't intended. Same reasoning, and the same
+    # ~/.bashrc line, as ARGO_API_KEY (see .context/DEPLOY.md).
+    #
+    # Even fully armed this publishes nothing until the user shares a specific
+    # experiment from the Report panel; sharing is per experiment, never
+    # per profile.
+    "report_sync_enabled": False,
+    # Where the mirror publishes to: "gdocs" (a Google Doc shared read-only by
+    # link, see B_PILOT/report_gdocs.py) or "outbox" (write to a shared folder
+    # and let the report_relay/ daemon on an internet-connected machine
+    # publish it -- for a workstation with no route out). "gdocs" needs no
+    # hosting at all, which is why it is the default. An unavailable backend
+    # (the Google client libraries are not in the pinned beamline environment)
+    # falls back to "outbox" rather than erroring -- it is the one sink with
+    # no optional dependency to be missing -- so a profile naming "gdocs"
+    # stays harmless on a machine without those libraries.
+    "report_sync_backend": "gdocs",
+    # Optional Drive folder id to create report documents in ("gdocs" only).
+    # Blank means the account's My Drive root. Not a secret -- a folder id is
+    # useless without access to the folder -- so the profile is the right home.
+    "report_gdocs_folder_id": "",
+    # Longest the remote copy may lag the local record, in seconds. One number
+    # does for the whole debounce: it is the ceiling that stops a plan
+    # streaming output into history.jsonl from starving the push, and the
+    # quiet period that coalesces a burst of edits is derived from it.
+    "report_sync_interval_s": 5,
     # Auto-start MIDAS_GUI's live view when a Run/Queue dispatch involves an
     # area_detector device (see B_PILOT/midas_bridge.py). On by default -- a
     # no-op if MIDAS_GUI isn't running; never auto-launches it. Toggled from

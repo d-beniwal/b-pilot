@@ -353,6 +353,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_report.setChecked(bool(config.get("report_enabled")))
         self._act_report.blockSignals(False)
         self.report.load(config.get("beamline"), self.console.experiment)
+        self._point_report_sync()
         self._set_toolbar_status(notify)
         QtCore.QTimer.singleShot(0, self._refresh_attach_availability)
 
@@ -682,6 +683,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_report_toggled(self, checked: bool) -> None:
         self.report.setVisible(checked)
 
+    def _point_report_sync(self) -> None:
+        """Tell the remote-report mirror which experiment it is following.
+
+        Pushed from here rather than read by the sync worker itself:
+        ``config._cache`` is invalidated on a profile switch and lazily
+        re-read, so a background thread calling ``config.get("beamline")``
+        mid-switch can see the old profile for a cycle -- and publish one
+        experiment's record to another experiment's link.
+
+        The import is inside the guard on purpose. With sync switched off,
+        ``report_sync`` is never imported, never starts a thread and never
+        opens a socket -- the same shape as ``config_dialog.accept``'s guarded
+        ``qs_client.reset()``, and the property ``verify_report_sync.py``
+        checks first.
+        """
+        if not config.get("report_sync_enabled"):
+            return
+        try:
+            from . import report_sync
+            report_sync.set_subject(config.get("beamline"), self.console.experiment)
+        except Exception:  # noqa: BLE001 -- mirroring must never break the GUI
+            pass
+
     def _on_report_visibility_changed(self, visible: bool) -> None:
         """Keep config + the menu checkbox in sync however the dock was hidden
         (ribbon tab, title-bar close, menu) -- mirrors the AutoPILOT pair above."""
@@ -813,6 +837,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # kernel is busy.
         self.session_log.load(config.get("beamline"), self.console.experiment)
         self.report.load(config.get("beamline"), self.console.experiment)
+        self._point_report_sync()
         if attached:
             # Jump to the transcript so a reattached (possibly busy) kernel shows
             # activity immediately, instead of the blank interactive prompt.

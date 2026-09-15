@@ -1,6 +1,14 @@
 """Modal dialog gating "Launch IPython": confirm the DM experiment and setup
 file before a kernel starts, so the experiment banner shown once it's running
 (see :mod:`main_window`) is never a guess.
+
+If the active profile sets ``experiment_data_root``, this is also the one
+place a user is asked to confirm an experiment name B-PILOT can't find a DM
+folder for -- accepting files it as a **local/temporary** experiment, which
+just means "no matching folder exists yet" and lets
+:func:`experiment_history.experiment_dir` fall back to its old,
+B-PILOT-owned location. See that function's docstring for the actual rule:
+B-PILOT never creates the top-level experiment folder itself.
 """
 from __future__ import annotations
 
@@ -9,15 +17,24 @@ import os
 from PyQt5 import QtWidgets
 
 from . import config
+from . import experiment_history as _eh
 
 _DEFAULT_SETUP_FILE = "exp_setup.yml"
 
 
-def _experiment_dir(experiment: str) -> str:
-    """Path where ``instrument/session_logs.py`` expects this experiment's
-    data/log folder — created by the beamline's data-management setup, never
-    by B-PILOT."""
-    return os.path.join(os.path.expanduser("~"), "new_data", experiment)
+def _dm_experiment_dir(experiment: str) -> str | None:
+    """Path where the beamline's data-management workflow is expected to
+    have already created this experiment's folder — created by DM, never by
+    B-PILOT (see :func:`experiment_history.experiment_dir`'s docstring for
+    the same rule enforced at the storage layer).
+
+    ``None`` if this profile has no ``experiment_data_root`` configured —
+    nothing to check an experiment name against (e.g. `demo`/`s3idc`).
+    """
+    root = (config.get("experiment_data_root") or "").strip()
+    if not root:
+        return None
+    return os.path.join(os.path.expanduser(root), experiment)
 
 
 class LaunchDialog(QtWidgets.QDialog):
@@ -78,15 +95,27 @@ class LaunchDialog(QtWidgets.QDialog):
 
     def accept(self) -> None:
         experiment = self.experiment()
-        exp_dir = _experiment_dir(experiment)
-        if experiment and not os.path.isdir(exp_dir):
-            ans = QtWidgets.QMessageBox.warning(
+        exp_dir = _dm_experiment_dir(experiment)
+        if experiment and exp_dir and not os.path.isdir(exp_dir):
+            # experiment_dir() applies the exact same "DM folder doesn't
+            # exist" check internally (see its docstring), so at this point
+            # it already resolves to the local/temporary fallback location
+            # -- reuse it rather than re-deriving the path here.
+            beamline = config.get("beamline") or ""
+            local_dir = _eh.experiment_dir(beamline, experiment)
+            ans = QtWidgets.QMessageBox.question(
                 self,
-                "Experiment directory not found",
-                f"No directory found for experiment {experiment!r}:\n\n{exp_dir}\n\n"
-                "This folder is created by the beamline's data-management setup, "
-                "not by B-PILOT — double-check the experiment name.\n\n"
-                "Launch anyway?",
+                "Experiment not found",
+                f"No existing experiment folder for {experiment!r}:\n\n{exp_dir}\n\n"
+                "That folder is created by the beamline's data-management "
+                "workflow — B-PILOT never creates it itself, so double-check "
+                "the experiment name first.\n\n"
+                "Create this as a LOCAL/TEMPORARY experiment instead? Its "
+                "records (kernel history, report, AutoPILOT chats) will be "
+                f"kept only under this workstation's own\n{local_dir}\n"
+                "rather than alongside the real experiment data — typically "
+                "used for testing.\n\n"
+                "Choose No to go back and re-check the experiment name.",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No,
             )

@@ -1,0 +1,6 @@
+# The relay only. Install on the relay host, NOT on the beamline workstation --
+# the whole point of this component is that the beamline side needs nothing
+# beyond the standard library.
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.0
+python-docx>=1.1

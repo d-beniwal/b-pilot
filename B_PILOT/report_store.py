@@ -1,10 +1,12 @@
 """The experiment report's master file -- B-PILOT's lab record for a beamtime.
 
 **One file per experiment**, sitting next to the kernel history it is built
-from, so the whole record of a beamtime travels as a single folder::
+from, so the whole record of a beamtime travels as a single folder (see
+:mod:`experiment_history`'s module docstring for both layouts this can
+resolve to)::
 
-    <session_dir>/<beamline>/experiments/<safe-name>/history.jsonl   (kernel transcript)
-    <session_dir>/<beamline>/experiments/<safe-name>/report.jsonl    (the report)
+    <experiment_dir>/history.jsonl   (kernel transcript)
+    <experiment_dir>/report.jsonl    (the report)
 
 ``report.jsonl`` is the master. Everything the report contains lives in it --
 plan runs, notes, beamline snapshots, section headings, blocks accepted from
