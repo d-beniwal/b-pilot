@@ -25,14 +25,25 @@ change without editing code:
   :mod:`device_discovery`) and ``device_selection`` (per-name shown/hidden).
 
 All of the above (plus Session/Appearance) live in a **profile** — a folder
-per beamline under :data:`PROFILES_DIR`, e.g. ``profiles/20ide/``,
-``profiles/20idd/`` — so a different beamline (different plans, devices,
+per beamline under :data:`PROFILES_DIR`, e.g. ``profiles/s20ide/``,
+``profiles/s20idd/`` — so a different beamline (different plans, devices,
 launch scripts, screen/kernel naming) is a different profile, loadable/
 editable/saveable independently, rather than a single hand-edited file. Only
 one file, a tiny pointer at :data:`CONFIG_PATH`
-(``{"active_profile": "20ide"}``), says which profile is active (i.e. which
+(``{"active_profile": "s20ide"}``), says which profile is active (i.e. which
 beamline folder is currently selected — not to be confused with the
 default/active split described next).
+
+**The profile folder name IS the beamline identity.** ``beamline`` and
+``session_dir`` are :data:`_PINNED_KEYS`: derived on load, never written to
+either profile file, and not editable in the Configuration dialog. They used
+to be ordinary settings, and both drifted — ``profiles/s20ide`` ended up
+carrying ``beamline: "20ide"`` (and once ``"testbl"``), while ``session_dir``
+was pointed at a macOS temp dir. Each distinct value silently created its own
+``~/.bluesky_pilot/<value>/`` tree, so the fixed per-beamline kernel path the
+README documents stopped being where the kernel actually was. Pinning them
+makes ``profiles/<name>/`` <-> ``~/.bluesky_pilot/<name>/`` a structural
+guarantee for every profile, existing and new.
 
 Each profile folder holds **two** files, not one:
 
@@ -114,7 +125,10 @@ DEFAULTS: dict = {
     "keep_kernel_on_exit": True,          # leave the kernel running when the GUI closes
     "last_kernel_connection_file": "",    # runtime state — path to reattach to
     # Single-instance kernel (see kernel_session.py):
-    "beamline": "20ide",                  # identifies the one-kernel-per-beamline session
+    # Both of these are PINNED (see _PINNED_KEYS): the placeholders below are
+    # never the effective value -- `beamline` is forced to the profile folder
+    # name and `session_dir` to _paths.SESSION_DIR_DEFAULT on every load.
+    "beamline": "",                       # derived: the profile folder name
     "use_screen": True,                   # host the kernel in a named screen session
     "session_dir": _paths.SESSION_DIR_DEFAULT,  # fixed per-beamline runtime paths
     # Optional root under which this beamline's EXPERIMENT-specific records
@@ -325,9 +339,35 @@ _WORKSTATION_KEYS = {
     "plans_dir",
     "import_root",
     "embedded_starter_script",
-    "session_dir",
     "last_kernel_connection_file",
 }
+
+# Keys that are DERIVED, not configured: forced to their computed value by
+# :func:`_apply_pinned` on every load and dropped from every file we write, so
+# a legacy override still on disk is ignored rather than obeyed. See the module
+# docstring for why these two stopped being ordinary settings.
+_PINNED_KEYS = ("beamline", "session_dir")
+
+# Pure runtime state that must never reach a profile's *shared baseline*
+# (``default_config.json``), which is committed to git and handed to another
+# workstation. `_WORKSTATION_KEYS` alone does not cover this: `_as_overrides`
+# drops one of those only when it still equals the computed default, so a real
+# value always survives -- which is how one workstation's absolute
+# ``~/.bluesky_pilot/20ide/kernel.json`` came to be committed in the s20ide
+# profile. Narrow on purpose: s1id's committed ``bluesky_root``/``plans_dir``/
+# ``import_root`` under /home/beams12/S1IDUSER are deliberate and must keep
+# round-tripping through "Save as default".
+_NEVER_IN_DEFAULTS = {"last_kernel_connection_file"}
+
+
+def _apply_pinned(merged: dict, name: str) -> dict:
+    """Force the derived :data:`_PINNED_KEYS` onto an effective-config dict.
+
+    ``name`` is the profile folder name, which *is* the beamline identity.
+    """
+    merged["beamline"] = name
+    merged["session_dir"] = _paths.SESSION_DIR_DEFAULT
+    return merged
 
 _cache: dict | None = None
 _active_profile: str | None = None
@@ -463,14 +503,17 @@ def set_active_profile(name: str) -> None:
 def _as_overrides(cfg: dict) -> dict:
     """Full-effective-config -> the dict actually written to a profile file.
 
-    Every key is kept as-is except :data:`_WORKSTATION_KEYS`, which are
-    dropped when they still match the computed default (see module
-    docstring).
+    Every key is kept as-is except :data:`_PINNED_KEYS`, which are dropped
+    unconditionally (they are derived, so persisting them is what let them
+    drift), and :data:`_WORKSTATION_KEYS`, which are dropped when they still
+    match the computed default (see module docstring).
     """
     return {
         k: v
         for k, v in cfg.items()
-        if k in DEFAULTS and (k not in _WORKSTATION_KEYS or v != DEFAULTS[k])
+        if k in DEFAULTS
+        and k not in _PINNED_KEYS
+        and (k not in _WORKSTATION_KEYS or v != DEFAULTS[k])
     }
 
 
@@ -481,7 +524,10 @@ def new_profile(name: str, clone_from: str | None = None) -> None:
     if not name or name in list_profiles():
         raise ValueError(f"Invalid or already-existing profile name: {name!r}")
     if clone_from:
-        overrides = _read_json(_default_path(clone_from))
+        # Strip the derived keys: a clone must take the NEW folder's identity,
+        # never inherit the source profile's beamline/session_dir.
+        overrides = {k: v for k, v in _read_json(_default_path(clone_from)).items()
+                     if k not in _PINNED_KEYS}
     else:
         overrides = _as_overrides(dict(DEFAULTS))
     _write_json(_default_path(name), overrides)
@@ -507,7 +553,9 @@ def save_as_default(name: str, values: dict) -> None:
         raise ValueError("Profile name required")
     merged = dict(DEFAULTS)
     merged.update({k: v for k, v in values.items() if k in DEFAULTS})
-    _write_json(_default_path(name), _as_overrides(merged))
+    overrides = {k: v for k, v in _as_overrides(merged).items()
+                 if k not in _NEVER_IN_DEFAULTS}
+    _write_json(_default_path(name), overrides)
 
 
 def delete_profile(name: str) -> None:
@@ -532,7 +580,7 @@ def profile_values(name: str) -> dict:
     merged = dict(DEFAULTS)
     raw = _migrate_bluesky_root_key(_read_json(_active_path(name)))
     merged.update({k: v for k, v in raw.items() if k in DEFAULTS})
-    return merged
+    return _apply_pinned(merged, name)
 
 
 def default_profile_values(name: str) -> dict:
@@ -541,7 +589,7 @@ def default_profile_values(name: str) -> dict:
     merged = dict(DEFAULTS)
     raw = _migrate_bluesky_root_key(_read_json(_default_path(name)))
     merged.update({k: v for k, v in raw.items() if k in DEFAULTS})
-    return merged
+    return _apply_pinned(merged, name)
 
 
 def as_dict() -> dict:
@@ -558,11 +606,16 @@ def get(key: str):
 
 
 def update(values: dict) -> None:
-    """Merge `values` (known keys only) into the active profile and persist."""
+    """Merge `values` (known keys only) into the active profile and persist.
+
+    :data:`_PINNED_KEYS` are ignored: they are derived, and letting a caller
+    push one into the in-memory cache would desync it from what `save()`
+    writes (which drops them) until the next reload.
+    """
     global _cache
     cfg = as_dict()
     for k, v in values.items():
-        if k in DEFAULTS:
+        if k in DEFAULTS and k not in _PINNED_KEYS:
             cfg[k] = v
     _cache = cfg
     save()
@@ -573,9 +626,10 @@ def save() -> None:
     self-documenting (best effort).
 
     Every setting is written out in full, even where it matches the built-in
-    default — except :data:`_WORKSTATION_KEYS`, which stay diff-only so a
-    profile committed to git doesn't bake in one workstation's absolute
-    paths (see module docstring).
+    default — except :data:`_PINNED_KEYS` (derived, never written) and
+    :data:`_WORKSTATION_KEYS`, which stay diff-only so a profile committed to
+    git doesn't bake in one workstation's absolute paths (see module
+    docstring).
     """
     try:
         _write_json(_active_path(active_profile()), _as_overrides(as_dict()))

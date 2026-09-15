@@ -21,7 +21,6 @@
   "bluesky_startup": "",
   "send_import_line": false,
   "keep_kernel_on_exit": true,
-  "beamline": "s1id",
   "use_screen": true,
   "launch_mode": "embedded",
   "dm_experiment": "",

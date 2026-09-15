@@ -9,7 +9,6 @@
   "send_import_line": false,
   "embedded_starter_script": "starter_scripts/bits_3idc.sh",
   "keep_kernel_on_exit": true,
-  "beamline": "3idc",
   "use_screen": true,
   "dm_experiment": "",
   "setup_file": "exp_setup.yml",

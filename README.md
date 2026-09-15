@@ -29,6 +29,18 @@ time.
 - **Run controls** — pause/resume/stop/abort the RunEngine from the toolbar
   without switching to a terminal.
 - **Data viewer** — browse runs from a `databroker` catalog.
+- **Remote report mirror** *(optional)* — publish a read-only copy of an
+  experiment report so collaborators off-site can follow it. B-PILOT only ever
+  pushes *outward*; the workstation opens no port, so a remote reader has no
+  access to it or to the instrument. Off by default and per-experiment opt-in,
+  and it additionally requires a credential in the environment. Published as
+  a **Google Doc** — no hosting needed, but readers refresh rather than watch,
+  updates are held to one every 30 s, and Drive keeps earlier revisions of
+  what was published (so hiding an entry is not retroactive there); figures
+  are carried into the document. See `documents/GDOCS_SETUP.md`. A workstation
+  with no route to the internet at all can instead write to a **shared
+  outbox** and let a relay on a machine that does have internet publish from
+  there — see `report_relay/README.md`.
 - **Configurable plan scope** — a Configuration dialog controls which
   directory is scanned for plans, which files are even shown in the file
   browser ("Plan visibility," with select-all/deselect-all), and what startup
@@ -129,16 +141,28 @@ Each beamline's kernel keeps its connection file at a fixed, predictable path
 (`B_PILOT/kernel_session.py`):
 
 ```
-<session_dir>/<beamline>/kernel.json      # default session_dir: ~/.bluesky_pilot
+~/.bluesky_pilot/<beamline>/kernel.json
 ```
 
-e.g. for the default `beamline = "20ide"`: `~/.bluesky_pilot/20ide/kernel.json`
-(`beamline` and `session_dir` are both Configuration values). Point any
-Jupyter client at that file with `--existing <path>`:
+`<beamline>` is the **profile folder name** — so the `s20idd` profile is always
+`~/.bluesky_pilot/s20idd/kernel.json`. Neither half of that path is
+configurable: both are derived (`config._PINNED_KEYS`), and the beamline id is
+shown read-only in the Configuration dialog. They used to be editable settings
+and drifted apart from the profile, which left the documented path pointing at a
+kernel that no longer existed. Point any Jupyter client at the file with
+`--existing <path>`:
 
 ```bash
-jupyter qtconsole --existing ~/.bluesky_pilot/20ide/kernel.json
-jupyter console   --existing ~/.bluesky_pilot/20ide/kernel.json
+jupyter qtconsole --existing ~/.bluesky_pilot/s20idd/kernel.json
+jupyter console   --existing ~/.bluesky_pilot/s20idd/kernel.json
+```
+
+If a client reports `kernel died: 3.0…` immediately, it reached the file but
+nothing answered on its heartbeat port — that connection file is stale, not a
+crashed kernel. Ask the code where the live one is:
+
+```bash
+python -m B_PILOT.kernel_session status --beamline s20idd   # prints connection_file + alive
 ```
 
 This works from any terminal or `screen` session — it doesn't need to be the
@@ -159,7 +183,7 @@ To instead watch the raw process (stdout, tracebacks — not a Jupyter
 client), reattach to the `screen` session hosting it:
 
 ```bash
-screen -r bluesky-kernel-20ide
+screen -r bluesky-kernel-s20idd
 ```
 
 ## Status
@@ -168,7 +192,7 @@ Actively developed for MPE (Sectors 1/20). The plan-parsing grammar,
 device-picker, queue, and console machinery are beamline-agnostic by
 construction, and every beamline-specific setting — plans directory/
 visibility, launch/session commands, device search paths, appearance — lives
-in a **profile** — a folder (`profiles/<name>/`, e.g. `profiles/20ide/`)
+in a **profile** — a folder (`profiles/<name>/`, e.g. `profiles/s20ide/`)
 holding a shared `default_config.json` (git-committed baseline) and a live
 `active_config.json` (per-workstation, gitignored, bootstrapped from the
 default on first use) — editable from the Configuration dialog's profile
