@@ -383,22 +383,17 @@ class MainWindow(QtWidgets.QMainWindow):
             # without being told why. Switching between instruments of
             # different layouts (mpe_bluesky vs. a BITS package such as
             # 3-ID-C's id3c) always lands here.
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Restart required",
+            self._offer_restart(
                 f"Profile '{name}' uses a different Bluesky root:\n"
                 f"{config.get('bluesky_root') or '(auto-detected)'}\n\n"
                 "That is resolved once at startup, so the plan list, import "
                 "lines and device catalog still refer to the previous "
-                "profile's checkout.\n\nRestart B-PILOT before running "
-                "anything from this profile.",
+                "profile's checkout."
             )
         elif appearance_changed:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Restart required",
-                "Restart B-PILOT for the new profile's appearance settings "
-                "to take effect.",
+            self._offer_restart(
+                f"Profile '{name}' changed appearance settings that are "
+                "only applied at startup."
             )
 
     # ── Right panel: console + notes ────────────────────────────────────────────
@@ -634,11 +629,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 or config.get("font_family") != old_font
                 or config.get("bluesky_root") != old_bluesky_root
             ):
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Restart required",
-                    "Restart B-PILOT for the new appearance and/or "
-                    "Bluesky-root settings to take effect.",
+                self._offer_restart(
+                    "Saving changed the appearance and/or Bluesky-root "
+                    "settings, which are only applied at startup."
                 )
 
     def _show_autopilot_diagnostics(self) -> None:
@@ -1072,6 +1065,38 @@ class MainWindow(QtWidgets.QMainWindow):
             self._viewer_poll_timer.setInterval(2000)
             self._viewer_poll_timer.timeout.connect(self._poll_viewer_alive)
         self._viewer_poll_timer.start()
+
+    def _offer_restart(self, message: str) -> None:
+        """Ask the user whether to restart now; restart on Yes."""
+        resp = QtWidgets.QMessageBox.question(
+            self,
+            "Restart required",
+            f"{message}\n\nRestart B-PILOT now?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if resp == QtWidgets.QMessageBox.Yes:
+            self._restart_application()
+
+    def _restart_application(self) -> None:
+        """Launch a fresh, detached B-PILOT process, then quit this one.
+
+        Mirrors _toggle_viewer's detached-launch pattern. Quitting via
+        QApplication.quit() bypasses closeEvent but still fires aboutToQuit
+        (app.py), which runs the same keep/kill-kernel logic as a normal
+        manual quit -- so the persistent kernel is unaffected either way.
+        """
+        ok, _pid = QtCore.QProcess.startDetached(
+            sys.executable, ["-m", "B_PILOT"], paths.PKG_PARENT
+        )
+        if not ok:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Restart failed",
+                "Could not start a new B-PILOT process. Please restart it manually.",
+            )
+            return
+        QtWidgets.QApplication.instance().quit()
 
     def _poll_viewer_alive(self) -> None:
         if self._viewer_pid is None or not self._is_pid_alive(self._viewer_pid):

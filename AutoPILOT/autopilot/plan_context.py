@@ -6,13 +6,15 @@ The docstring grammar (``GRAMMAR`` below) is deliberately hand-written, not
 derived at runtime -- it changes rarely and costs real tokens every session.
 
 The template registry (``TEMPLATES``), however, IS derived at import time
-from ``B_PILOT.plan_parser.find_plan_specs()`` over every plan function in
-``scan_skeletons.py`` / ``scans_standard.py`` / ``scans_stationary.py`` --
-the same three files, and the same parser, B-PILOT's own plan-runner form
-uses. This keeps AutoPILOT's drafting scope exactly in sync with what a
-human can already run through B-PILOT's GUI: add a new documented plan to
-one of those files (or reformat an existing one into the grammar) and it
-becomes draftable with no change here.
+from ``B_PILOT.plan_parser.find_plan_specs()`` over every ``.py`` entry in
+the ACTIVE PROFILE's own ``visible_plan_files`` whitelist (the same config
+key, and the same parser, B-PILOT's own plan-runner file browser uses --
+see ``B_PILOT/plan_runner.py``'s ``_populate_file_browser``). This keeps
+AutoPILOT's drafting scope exactly in sync with what a human can already
+run through B-PILOT's GUI, on every profile (MPE, a BITS instrument like
+s3idc, or the fully-simulated ``demo`` stack) -- add a new documented plan
+to a file already listed there (or reformat an existing one into the
+grammar) and it becomes draftable with no change here.
 
 Each template wraps one of these real, tested plans rather than reproducing
 its body -- the LLM only ever fills in the parameters the plan's own
@@ -28,6 +30,7 @@ from ._bpilot_path import ensure_bpilot_on_path
 
 ensure_bpilot_on_path()
 
+from B_PILOT import config as bpilot_config  # noqa: E402
 from B_PILOT import paths as bpilot_paths  # noqa: E402
 from B_PILOT.plan_parser import ParamSpec, find_plan_specs  # noqa: E402  (reused, not reinvented)
 
@@ -73,15 +76,22 @@ Rules:
 STEP_SCAN = "step_scan"
 COUNT = "count"
 
-# The three real plan files whose documented top-level functions are all in
-# scope for AutoPILOT drafting -- exactly the files B-PILOT's own plan-runner
-# form already supports (see profiles/*/active_config.json's
-# visible_plan_files). Update by hand if a new shared plan file joins that set.
-_TEMPLATE_FILES: tuple[str, ...] = (
-    "scan_skeletons.py",
-    "scans_standard.py",
-    "scans_stationary.py",
-)
+
+def _template_files() -> list[str]:
+    """``plans_dir``-relative ``.py`` files in scope for AutoPILOT drafting.
+
+    Reads the ACTIVE PROFILE's ``visible_plan_files`` (the same whitelist
+    B-PILOT's own plan-runner file browser uses -- see
+    ``B_PILOT/plan_runner.py``'s ``_populate_file_browser``), not a
+    hardcoded MPE-specific list: a BITS profile like ``s3idc`` points this
+    at ``user/s3idc_gui/...``, and ``demo`` at ``plans.py``, both of which
+    a fixed MPE-only tuple would silently miss (leaving ``TEMPLATES`` empty
+    and every ``propose_*_plan`` tool unavailable on those profiles).
+    Preset ``.json`` entries in the same whitelist are for the GUI's own
+    file browser only and are not (yet) draftable here.
+    """
+    visible = bpilot_config.get("visible_plan_files") or []
+    return [f for f in visible if f.endswith(".py")]
 
 
 @dataclass(frozen=True)
@@ -110,7 +120,7 @@ class Template:
 
 def _build_templates() -> dict[str, Template]:
     templates: dict[str, Template] = {}
-    for filename in _TEMPLATE_FILES:
+    for filename in _template_files():
         path = os.path.join(bpilot_paths.PLANS_DIR, filename)
         for name, spec in find_plan_specs(path).items():
             if not spec["documented"]:

@@ -155,7 +155,9 @@ class ConfigDialog(QtWidgets.QDialog):
             ("Scan blocks", self._page(self._build_scan_blocks_card())),
             ("Queue Backend", self._page(self._build_queue_backend_card())),
             ("Data Viewer", self._page(self._build_data_viewer_card())),
-            ("Reports", self._page(self._build_reports_card(), self._build_report_sync_card())),
+            ("Reports", self._page(
+                self._build_reports_card(), self._build_report_sync_card(), scrollable=True
+            )),
             ("Appearance", self._page(
                 self._build_appearance_card(), self._build_autopilot_card()
             )),
@@ -175,14 +177,26 @@ class ConfigDialog(QtWidgets.QDialog):
         self._tab_list.setCurrentRow(0)
 
     @staticmethod
-    def _page(*widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
+    def _page(*widgets: QtWidgets.QWidget, scrollable: bool = False) -> QtWidgets.QWidget:
+        """Wrap one or more cards into a tab page.
+
+        `scrollable=True` puts the page in a `QScrollArea` (same pattern as
+        the Devices/Scan blocks cards' own internal lists) for a tab whose
+        cards, stacked together, can exceed the dialog's height — without it,
+        Qt just compresses everything to fit, squashing buttons and fields.
+        """
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         for w in widgets:
             layout.addWidget(w)
         layout.addStretch(1)
-        return page
+        if not scrollable:
+            return page
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
 
     # ── Profile bar ──────────────────────────────────────────────────────────────
 
