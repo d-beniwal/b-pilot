@@ -1,4 +1,5 @@
 {
+  "bluesky_root": "/home/beams/S3BLUE/3idc-bits",
   "default_plan_file": "setup_june_26.py",
   "visible_plan_files": [
     "user/s3idc_plans/setup_june_26.py",
@@ -6,7 +7,7 @@
     "user/s3idc_gui/sim_plans.py"
   ],
   "bluesky_startup": "",
-  "send_import_line": false,
+  "send_import_line": true,
   "embedded_starter_script": "starter_scripts/bits_3idc.sh",
   "keep_kernel_on_exit": true,
   "use_screen": true,
