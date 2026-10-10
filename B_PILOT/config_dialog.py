@@ -598,8 +598,9 @@ class ConfigDialog(QtWidgets.QDialog):
 
         card.body.addWidget(
             QtWidgets.QLabel(
-                "Directories scanned for device-defining .py files (never imported "
-                "— only their __all__ list is read):"
+                "Directories scanned for device-defining files (never imported "
+                "— only a .py file's __all__ list, or a Guarneri-style "
+                "devices.yml's entries, are read statically):"
             )
         )
         paths_row = QtWidgets.QHBoxLayout()

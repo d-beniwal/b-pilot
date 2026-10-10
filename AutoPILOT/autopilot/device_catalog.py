@@ -28,18 +28,24 @@ class DeviceCatalog:
 
     beamline: str
     by_category: dict[str, list[str]]
-    import_module_by_name: dict[str, str]  # device name -> dotted module, relative to instrument/plans/
+    # device name -> dotted module relative to instrument/plans/, or None for a
+    # BITS/YAML-sourced device (see import_line_for): those have no importable
+    # Python symbol -- apsbits's make_devices() injects them as kernel globals
+    # directly, so no import line is needed or possible.
+    import_module_by_name: dict[str, str | None]
     axes: dict[str, list[str]]  # motor device name -> scannable axis names (see B_PILOT/axis_discovery.py)
 
     def names_for(self, category: str) -> list[str]:
         return list(self.by_category.get(category, []))
 
     def import_line_for(self, name: str) -> str:
-        """A ``from ..x.y import name`` line resolvable from a file inside instrument/plans/."""
-        module = self.import_module_by_name.get(name)
-        if module is None:
+        """A ``from ..x.y import name`` line resolvable from a file inside
+        instrument/plans/, or ``""`` if `name` is already a kernel global
+        (a BITS/YAML-sourced device -- see :data:`import_module_by_name`)."""
+        if name not in self.import_module_by_name:
             raise KeyError(f"Unknown device {name!r} -- not in this catalog")
-        return f"from ..{module} import {name}"
+        module = self.import_module_by_name[name]
+        return f"from ..{module} import {name}" if module is not None else ""
 
     def axes_for(self, name: str) -> list[str]:
         """Scannable axis names for motor device `name` (empty if it has none).
@@ -72,13 +78,18 @@ def load(profile: str | None = None) -> DeviceCatalog:
 
     resolved_paths = [bpilot_device_source.resolve_path(p) for p in search_paths]
     by_category: dict[str, list[str]] = {}
-    import_module_by_name: dict[str, str] = {}
+    import_module_by_name: dict[str, str | None] = {}
     for device in bpilot_device_discovery.scan(resolved_paths):
         cat_selection = selection.get(device.category, {})
         if not cat_selection.get(device.name, True):  # unseen names default shown
             continue
         by_category.setdefault(device.category, []).append(device.name)
-        import_module_by_name[device.name] = _module_relative_to_project(device.source_file)
+        if device.source_file.lower().endswith((".yml", ".yaml")):
+            # BITS/Guarneri-YAML device: no importable Python symbol exists --
+            # apsbits's make_devices() injects it as a kernel global directly.
+            import_module_by_name[device.name] = None
+        else:
+            import_module_by_name[device.name] = _module_relative_to_project(device.source_file)
 
     # Axes are a structural property of the same source files -- scanned
     # fresh here (never persisted), same AST-only guarantee as the device

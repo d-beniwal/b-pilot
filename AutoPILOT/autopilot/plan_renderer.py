@@ -133,7 +133,9 @@ def render_command(template: Template, clean: dict) -> str:
 def render(template: Template, clean: dict, catalog: DeviceCatalog, summary: str) -> tuple[str, str]:
     """Return (filename, file_text) for the validated `clean` kwargs."""
     device_names = _device_names_used(template, clean)
-    device_imports = [catalog.import_line_for(name) for name in device_names]
+    # A BITS/YAML-sourced device needs no import line (see
+    # DeviceCatalog.import_line_for) -- it's already a kernel global.
+    device_imports = [line for line in (catalog.import_line_for(n) for n in device_names) if line]
 
     sig_lines = []
     doc_lines = []

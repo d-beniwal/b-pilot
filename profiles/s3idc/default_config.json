@@ -19,7 +19,9 @@
   "autopilot_enabled": false,
   "midas_bridge_enabled": false,
   "queue_backend": "native",
-  "device_search_paths": [],
+  "device_search_paths": [
+    "src/id3c/configs"
+  ],
   "device_selection": {},
   "device_category_overrides": {},
   "plan_building_search_paths": [],

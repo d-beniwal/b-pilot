@@ -33,6 +33,13 @@ three source shapes:
 A device whose constructor resolves to none of these (e.g. a bare
 ``cork = MPEMotor(...)`` leaf, which is already settable) simply has no axes and
 is omitted from the result -- callers then emit the bare device name.
+
+For a **BITS** instrument (e.g. ``3idc-bits``), a multi-axis motor is instead
+declared in Guarneri-style YAML via ``apstools.devices.motor_factory.mb_creator``,
+whose ``motors:`` mapping's keys *are* the axis names (e.g. ``sample_stage``'s
+``motors: {xprime: ..., base_y: ..., zprime: ..., omega: ...}`` -> axes
+``['xprime', 'base_y', 'zprime', 'omega']``) -- no AST pattern-matching needed,
+just a YAML read (see :func:`_scan_yaml_file`).
 """
 from __future__ import annotations
 
@@ -183,6 +190,32 @@ def _generic_map_for(
     return merged
 
 
+def _scan_yaml_file(path: str) -> dict[str, list[str]]:
+    """{device_name: [axis,...]} from an ``mb_creator``-style ``motors:`` map."""
+    import yaml
+
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    result: dict[str, list[str]] = {}
+    for entries in data.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            motors = entry.get("motors")
+            if isinstance(name, str) and isinstance(motors, dict) and motors:
+                result[name] = list(motors.keys())
+    return result
+
+
 def scan(paths: list[str]) -> dict[str, list[str]]:
     """{device_name: [axis,...]} for every axis-bearing device under `paths`.
 
@@ -206,4 +239,11 @@ def scan(paths: list[str]) -> dict[str, list[str]]:
             axes = merged.get(device.class_name or "")
             if axes:
                 result[device.name] = list(axes)
+    for file_path in _dd._iter_yaml_files(paths):
+        for name, axes in _scan_yaml_file(file_path).items():
+            if name in seen:
+                continue
+            seen.add(name)
+            if axes:
+                result[name] = list(axes)
     return result
