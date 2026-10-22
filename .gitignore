@@ -2,10 +2,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# Claude context/config — local dev tooling, kept out of the repo (same
+# Agent context/config — local dev tooling, kept out of the repo (same
 # convention as the sibling mpe_bluesky/3idc-bits projects) so it never
 # leaks into this repo's history; stays on disk, just untracked.
-/CLAUDE.md
 /.context/
 
 # Per-installation runtime override (regenerated on first Configuration save;
