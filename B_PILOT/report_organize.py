@@ -249,3 +249,40 @@ class EntryDialog(QtWidgets.QDialog):
     def after_id(self) -> str:
         """Id of the entry the new one should follow (``""`` = the end)."""
         return self._place.currentData() or ""
+
+
+class EditTextDialog(QtWidgets.QDialog):
+    """Change the text of an existing entry. No placement: it stays where it is."""
+
+    def __init__(
+        self,
+        title: str,
+        prompt: str,
+        text: str,
+        *,
+        multiline: bool = True,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(QtWidgets.QLabel(prompt))
+        if multiline:
+            self._text: QtWidgets.QWidget = QtWidgets.QPlainTextEdit()
+            self._text.setPlainText(text)
+            self._text.setMinimumHeight(S.px(120))
+        else:
+            self._text = QtWidgets.QLineEdit(text)
+        layout.addWidget(self._text)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._text.setFocus()
+
+    def text(self) -> str:
+        if isinstance(self._text, QtWidgets.QPlainTextEdit):
+            return self._text.toPlainText().strip()
+        return self._text.text().strip()

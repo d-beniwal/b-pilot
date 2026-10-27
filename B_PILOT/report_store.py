@@ -28,7 +28,7 @@ the same lock-free reasoning as :func:`experiment_history.append_entry`, not
 the ``flock`` pattern the mutable stores use (``queue_store``,
 ``det_startup_state``).
 
-**Editing is an append, never a rewrite.** Moving a block or hiding it does not
+**Editing is an append, never a rewrite.** Moving, hiding, editing or deleting a block does not
 touch the entry it acts on: it appends an :data:`EDIT` entry naming that
 entry's ``id`` and the fields to override (see
 :func:`report_builder.apply_edits`). So the record is lossless -- a hidden
@@ -56,7 +56,7 @@ SNAPSHOT = "snapshot"    # a captured table of live device values
 IMAGE = "image"          # a figure; the pixels are a sidecar file (report_images)
 HEADING = "heading"      # a section break
 AGENT = "agent"          # a block a person accepted from AutoPILOT
-EDIT = "edit"            # an overlay on another entry: {target, pos?, hidden?}
+EDIT = "edit"            # an overlay on another entry: {target, pos?, hidden?, text?, notes?, deleted?}
 
 REPORT_FILENAME = "report.jsonl"
 
@@ -139,7 +139,10 @@ def append_event(
 def append_edits(beamline: str, experiment: str, edits: list[dict]) -> bool:
     """Append overlay entries; ``True`` if every one was written.
 
-    Each edit is ``{"target": <entry id>, "pos": <float>?, "hidden": <bool>?}``.
+    Each edit is ``{"target": <entry id>, "pos": <float>?, "hidden": <bool>?,
+    "text": <str>?, "notes": <list[str]>?, "deleted": <bool>?}``; which of
+    those take effect for which kind is policy in
+    :func:`report_builder.apply_edits`.
     They are written one line at a time rather than batched, keeping the
     one-entry-per-``write()`` guarantee that makes concurrent appends safe; a
     reordering that renormalises the whole report is therefore several lines,

@@ -36,6 +36,7 @@ from . import report_images as ri
 from . import report_organize as ro
 from . import report_render
 from . import report_store as rs
+from .report_view import ReportView
 from . import style as S
 from .snapshot_dialog import SnapshotDialog
 
@@ -116,7 +117,10 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         header.addWidget(self._share_chip)
         layout.addLayout(header)
 
-        self._view = QtWidgets.QTextBrowser()
+        self._view = ReportView()
+        self._view.edit_finished.connect(self._on_edit_finished)
+        self._view.menu_requested.connect(self._on_menu)
+        self._view.refused.connect(self._tip)
         self._view.setOpenExternalLinks(False)
         # Figures are wrapped in a link to their own file so a click opens them
         # full size. `setOpenLinks(False)` is what stops QTextBrowser from
@@ -353,7 +357,8 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         if not (self._beamline and self._experiment):
             return
         sources = rs.source_state(self._beamline, self._experiment)
-        if sources != self._sources:
+        # Never rebuild the document under someone who is typing in it.
+        if sources != self._sources and not self._view.has_session():
             self.refresh()
 
     @staticmethod
@@ -388,6 +393,9 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         """Reconcile new runs into ``report.jsonl`` and re-render the view."""
         if not (self._beamline and self._experiment):
             return
+        # Settle any edit in progress first: the rebuild below replaces the
+        # document, and the typed text must reach the record before it does.
+        self._view.end_session(commit=True)
         # Read the source state BEFORE collecting: collect() appends the run
         # entries it reconciles, so sampling afterwards would store a size the
         # next poll immediately disagrees with and rebuild on every tick.
@@ -491,6 +499,129 @@ class ReportDockWidget(QtWidgets.QDockWidget):
                     self._entries, identity, -1 if verb == "up" else 1
                 )
             )
+
+    def _entry(self, identity: str) -> dict | None:
+        return next(
+            (e for e in self._entries if report_builder.entry_id(e) == identity), None
+        )
+
+    def _tip(self, message: str) -> None:
+        QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), message, self._view)
+
+    def _on_edit_finished(
+        self, identity: str, text: str, changed: bool, fresh: bool, committed: bool
+    ) -> None:
+        """An in-place edit ended: record it, restore the view, or drop a stub."""
+        entry = self._entry(identity)
+        if entry is None or not report_builder.can_edit(entry):
+            self.refresh()
+            return
+        if fresh and not changed:
+            # A note added from the menu and left untouched: don't leave an
+            # empty "New note" behind in a lab record.
+            self._write_edits([{"target": identity, "deleted": True}])
+            return
+        if not (committed and changed and text.strip()):
+            self.refresh()  # Esc, or nothing changed -- show the stored text
+            return
+        if entry.get("kind") == rs.RUN:
+            self._write_edits([{"target": identity, "notes": [text]}])
+        else:
+            self._write_edits([{"target": identity, "text": text}])
+
+    def _on_menu(self, identity: str, where: QtCore.QPoint) -> None:
+        """Right-click menu: add a note around, restyle, hide, or delete a block."""
+        if not self._require_experiment():
+            return
+        entry = self._entry(identity) if identity else None
+        menu = QtWidgets.QMenu(self)
+        if self._view.textCursor().hasSelection():
+            menu.addAction("Copy", self._view.copy)
+            menu.addSeparator()
+        before = menu.addAction("Add note before")
+        after = menu.addAction("Add note after") if entry else menu.addAction("Add note at end")
+        before.setEnabled(entry is not None)
+        before.triggered.connect(lambda: self._add_note_beside(identity, before=True))
+        after.triggered.connect(lambda: self._add_note_beside(identity, before=False))
+
+        if entry is not None and report_builder.can_restyle(entry):
+            menu.addSeparator()
+            current = report_builder.effective_style(entry)
+            for label, style in (
+                ("Heading 1", report_builder.STYLE_H1),
+                ("Heading 2", report_builder.STYLE_H2),
+                ("Normal", report_builder.STYLE_NORMAL),
+            ):
+                act = menu.addAction(label)
+                act.setCheckable(True)
+                act.setChecked(style == current)
+                act.triggered.connect(
+                    lambda _=False, st=style: self._write_edits(
+                        [{"target": identity, "style": st}]
+                    )
+                )
+        if entry is not None:
+            menu.addSeparator()
+            if entry.get("kind") == rs.AGENT:
+                # Agent blocks are Markdown, so the rendered text is not what
+                # would be edited -- they open in a dialog showing the source.
+                menu.addAction("Edit text…", lambda: self._on_edit_entry(identity))
+            hidden = bool(entry.get("hidden"))
+            menu.addAction(
+                "Show" if hidden else "Hide",
+                lambda: self._write_edits([{"target": identity, "hidden": not hidden}]),
+            )
+            if report_builder.can_delete(entry):
+                menu.addAction("Delete", lambda: self._on_delete_entry(identity))
+        menu.exec_(where)
+
+    def _add_note_beside(self, identity: str, *, before: bool) -> None:
+        """A new note directly before/after block `identity`, opened for typing."""
+        if before:
+            position, prerequisites = report_builder.plan_insert_before(
+                self._entries, identity
+            )
+        else:
+            position, prerequisites = report_builder.plan_insert(self._entries, identity)
+        if prerequisites:
+            rs.append_edits(self._beamline, self._experiment, prerequisites)
+        fields = {"text": "New note"}
+        if position is not None:
+            fields["pos"] = position
+        event = rs.append_event(self._beamline, self._experiment, rs.NOTE, **fields)
+        self.refresh()
+        if event is not None:
+            self._view.begin_edit(event["id"], select_all=True, fresh=True)
+
+    def _on_edit_entry(self, identity: str) -> None:
+        """Dialog edit for an AutoPILOT block (Markdown source, not rendered text)."""
+        entry = self._entry(identity)
+        if entry is None or entry.get("kind") != rs.AGENT:
+            return
+        current = entry.get("text") or ""
+        dlg = ro.EditTextDialog("Edit AutoPILOT block", "Text:", current, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        text = dlg.text()
+        if text and text != current.strip():
+            self._write_edits([{"target": identity, "text": text}])
+
+    def _on_delete_entry(self, identity: str) -> None:
+        """Delete something the user wrote. Never a run, snapshot or run note."""
+        entry = self._entry(identity)
+        if entry is None or not report_builder.can_delete(entry):
+            return
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Delete entry",
+            f"Delete this entry from the report?\n\n{ro.entry_label(entry)}\n\n"
+            "It disappears from the report and its exports. The original is "
+            "kept in the report file, but the app has no way to bring it back.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+        self._write_edits([{"target": identity, "deleted": True}])
 
     def _on_reset_order(self) -> None:
         """Put every entry back where its timestamp says it belongs.
@@ -642,7 +773,8 @@ class ReportDockWidget(QtWidgets.QDockWidget):
         # beamline *right now*, so unlike a note or a figure there is no
         # earlier moment it could belong to. It can still be dragged later.
         self._append_placed(
-            rs.SNAPSHOT, "", title=dlg.captured_title(), rows=rows
+            rs.SNAPSHOT, "", title=dlg.captured_title(), rows=rows,
+            groups=dlg.captured_groups(),
         )
 
     def _on_paste_image(self) -> None:

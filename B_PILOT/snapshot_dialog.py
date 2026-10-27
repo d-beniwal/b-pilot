@@ -91,6 +91,7 @@ class SnapshotDialog(QtWidgets.QDialog):
 
         self._console = console
         self._rows: list[list[str]] = []
+        self._groups: list[str] = []   # groups the captured readings came from
         self._token = 0
         # Guards the group<->reading check cascade against re-entering itself:
         # setCheckState emits itemChanged, which is the very signal driving it.
@@ -205,6 +206,18 @@ class SnapshotDialog(QtWidgets.QDialog):
         finally:
             self._syncing = False
 
+    def _selected_groups(self) -> list[str]:
+        """Names of the groups that have at least one reading ticked."""
+        names: list[str] = []
+        for i in range(self._tree.topLevelItemCount()):
+            parent = self._tree.topLevelItem(i)
+            if any(
+                parent.child(j).checkState(0) == QtCore.Qt.Checked
+                for j in range(parent.childCount())
+            ):
+                names.append(parent.text(0))
+        return names
+
     def _selected_items(self) -> list[dict]:
         out: list[dict] = []
         for i in range(self._tree.topLevelItemCount()):
@@ -225,6 +238,7 @@ class SnapshotDialog(QtWidgets.QDialog):
         if not items:
             self._status.setText("Tick at least one reading first.")
             return
+        self._groups = self._selected_groups()
         if self._console is None or not self._console.is_running():
             self._status.setText("No kernel is running — nothing to read from.")
             return
@@ -302,6 +316,10 @@ class SnapshotDialog(QtWidgets.QDialog):
     def captured_rows(self) -> list[list[str]]:
         """``[[label, value, units], ...]`` as captured, or ``[]``."""
         return list(self._rows)
+
+    def captured_groups(self) -> list[str]:
+        """Groups the captured readings were ticked from, in tree order."""
+        return list(self._groups)
 
     def captured_title(self) -> str:
         return self._title.text().strip() or "Beamline snapshot"

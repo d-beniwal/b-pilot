@@ -128,12 +128,88 @@ def is_excluded(plan_name: str | None, patterns) -> bool:
     )
 
 
+#: Which field of an authored entry holds the text a person typed, per kind.
+#: This table *is* the edit policy: a kind absent from it (RUN, SNAPSHOT) has
+#: no user text to change -- plan data and beamline readings can only be hidden.
+#: A run's own note is the one exception, handled separately (``notes``).
+EDITABLE_FIELD = {
+    rs.NOTE: "text",
+    rs.AGENT: "text",
+    rs.HEADING: "title",
+    rs.IMAGE: "title",
+}
+
+
+def is_run_note(entry: dict) -> bool:
+    """A note that was typed for a run (its ``title`` is the run's command).
+
+    These came with the run, so they can be corrected but never deleted.
+    """
+    return entry.get("kind") == rs.NOTE and bool(
+        _RE_PLAN.search(entry.get("title") or "")
+    )
+
+
+def can_delete(entry: dict) -> bool:
+    """Whether the user may delete this entry: only what they authored."""
+    return entry.get("kind") in EDITABLE_FIELD and not is_run_note(entry)
+
+
+#: Presentation of a user-authored text entry. A free note defaults to
+#: ``normal`` and a section heading to ``h2``; either can be switched.
+STYLE_NORMAL, STYLE_H1, STYLE_H2 = "normal", "h1", "h2"
+STYLES = (STYLE_NORMAL, STYLE_H1, STYLE_H2)
+
+
+def can_restyle(entry: dict) -> bool:
+    """Whether the entry can be switched between Heading 1/2 and Normal.
+
+    Free notes and headings only -- a run's note belongs to the run.
+    """
+    return entry.get("kind") == rs.HEADING or (
+        entry.get("kind") == rs.NOTE and not is_run_note(entry)
+    )
+
+
+def effective_style(entry: dict) -> str:
+    style = entry.get("style")
+    if style in STYLES:
+        return style
+    return STYLE_H2 if entry.get("kind") == rs.HEADING else STYLE_NORMAL
+
+
+def entry_text(entry: dict) -> str:
+    """The text a person typed into a note or heading."""
+    if entry.get("kind") == rs.HEADING:
+        return entry.get("title") or entry.get("text") or ""
+    return entry.get("text") or ""
+
+
+def can_edit(entry: dict) -> bool:
+    """Whether the user may edit text in this entry.
+
+    A run is editable only through the notes that came with it; its plan data
+    is not editable at all.
+    """
+    if entry.get("kind") == rs.RUN:
+        return bool(entry.get("notes"))
+    return entry.get("kind") in EDITABLE_FIELD
+
+
 def apply_edits(events: list[dict], *, exclude=()) -> list[dict]:
     """Fold :data:`report_store.EDIT` overlays onto their targets.
 
     Returns the non-edit entries, each with its ``id`` filled in and any
-    ``pos``/``hidden`` override applied. Edits are newest-wins per *field*, so
-    hiding a block and later moving it keeps both.
+    ``pos``/``hidden``/``text``/``notes``/``deleted``/``style`` override applied. Edits
+    are newest-wins per *field*, so hiding a block and later moving it keeps
+    both.
+
+    **The edit policy is enforced here, at read time**, not only in the UI, so
+    a hand-written or stale overlay cannot change what must not change: a
+    ``text`` edit is honoured only for the kinds in :data:`EDITABLE_FIELD`
+    (never empty), ``notes`` only on a run, and ``deleted`` only where
+    :func:`can_delete` allows. A deleted entry is dropped from the result; the
+    original lines stay in the file. Edited entries carry ``edited=True``.
 
     Exclusion by plan name is applied as a **default** rather than an override:
     an explicit edit wins, so a run the config would suppress stays visible if
@@ -149,7 +225,11 @@ def apply_edits(events: list[dict], *, exclude=()) -> list[dict]:
         if not target:
             continue
         overrides.setdefault(str(target), {}).update(
-            {k: v for k, v in event.items() if k in ("pos", "hidden")}
+            {
+                k: v
+                for k, v in event.items()
+                if k in ("pos", "hidden", "text", "notes", "deleted", "style")
+            }
         )
 
     resolved: list[dict] = []
@@ -160,6 +240,25 @@ def apply_edits(events: list[dict], *, exclude=()) -> list[dict]:
         identity = entry_id(entry)
         entry["id"] = identity
         override = overrides.get(identity) or {}
+
+        if override.get("deleted") is True and can_delete(entry):
+            continue
+        field = EDITABLE_FIELD.get(entry.get("kind"))
+        text = override.get("text")
+        if field and isinstance(text, str) and text.strip():
+            entry[field] = text.strip()
+            entry["edited"] = True
+        if override.get("style") in STYLES and can_restyle(entry):
+            entry["style"] = override["style"]
+        notes = override.get("notes")
+        if (
+            entry.get("kind") == rs.RUN
+            and isinstance(notes, list)
+            and notes
+            and all(isinstance(n, str) and n.strip() for n in notes)
+        ):
+            entry["notes_override"] = [n.strip() for n in notes]
+            entry["edited"] = True
 
         if entry.get("kind") == rs.RUN and is_excluded(entry.get("plan_name"), exclude):
             entry["hidden"] = True
@@ -230,6 +329,17 @@ def plan_insert(entries: list[dict], after_id: str) -> tuple[float | None, list[
     if position is not None:
         return position, []
     return float(idx + 1) + 0.5, renumber(items)
+
+
+def plan_insert_before(entries: list[dict], before_id: str) -> tuple[float | None, list[dict]]:
+    """Like :func:`plan_insert`, for a new entry directly *before* `before_id`."""
+    items = ordered(entries)
+    idx = _index_of(items, before_id)
+    if idx is None:
+        return plan_insert(entries, "")
+    if idx == 0:
+        return sort_key(items[0]) - 1.0, []
+    return plan_insert(entries, entry_id(items[idx - 1]))
 
 
 def plan_move(entries: list[dict], moved_id: str, after_id: str) -> list[dict]:
@@ -487,6 +597,9 @@ CONTROL_SCHEME = "bpilot"
 def _controls_md(entry: dict, controls: bool) -> str:
     """The trailing ``[hide] [↑] [↓]`` links for one block, or nothing.
 
+    Editing, deleting, restyling and adding notes live in the panel's
+    right-click menu and in the text itself (see :func:`_region`), not here.
+
     Emitted only for the live panel. An exported document must never carry
     them: they are UI, they would render as dead links in anyone else's
     Markdown viewer, and a PDF of a lab record should read as a document.
@@ -500,6 +613,36 @@ def _controls_md(entry: dict, controls: bool) -> str:
         f" [↑]({CONTROL_SCHEME}:up/{identity})"
         f" [↓]({CONTROL_SCHEME}:down/{identity})"
     )
+
+
+#: Delimiters of an in-place-editable span in the *live* Markdown only.
+#: ``report_render`` turns ``⟦id|m⟧text⟦/⟧`` into named anchors that
+#: ``report_view`` uses to know where typing is allowed (``m`` = multi-line,
+#: ``s`` = single line). Exports never contain them.
+REGION_OPEN, REGION_SEP, REGION_CLOSE, REGION_END = "\u27e6", "|", "\u27e7", "\u27e6/\u27e7"
+_MARKER_CHARS = ("\u27e6", "\u27e7")
+
+
+def clean_text(text: str) -> str:
+    """`text` with the region delimiters removed, so typed text can never forge one."""
+    for ch in _MARKER_CHARS:
+        text = text.replace(ch, "")
+    return text
+
+
+def _region(identity: str, lines: list[str], *, multiline: bool, controls: bool) -> list[str]:
+    """`lines` wrapped as an editable region (live view only)."""
+    lines = [clean_text(ln) for ln in lines] or [""]
+    if not controls:
+        return lines
+    lines[0] = f"{REGION_OPEN}{identity}{REGION_SEP}{'m' if multiline else 's'}{REGION_CLOSE}{lines[0]}"
+    lines[-1] = lines[-1] + REGION_END
+    return lines
+
+
+def _edited_tag(entry: dict) -> str:
+    """Marks text a person changed after capture -- a lab record should say so."""
+    return " · edited" if entry.get("edited") else ""
 
 
 def _hidden_prefix(entry: dict) -> str:
@@ -545,6 +688,8 @@ def _run_markdown(run: dict, *, controls: bool = False, day: str = "") -> str:
 
     status = "✅ ok" if run["ok"] else "❌ failed"
     bits = [f"**Status:** {status}"]
+    if run.get("notes_override"):
+        bits.append("**Note edited**")
     if run["end_ts"]:
         bits.append(f"**Duration:** ~{_fmt_duration(run['end_ts'] - run['ts'])}")
     out.append(" · ".join(bits))
@@ -553,8 +698,15 @@ def _run_markdown(run: dict, *, controls: bool = False, day: str = "") -> str:
     if run["error"]:
         out.append(f"> ⚠ {run['error']}")
         out.append("")
+    single = len(run["notes"]) == 1
     for note in run["notes"]:
-        for line in note.splitlines() or [""]:
+        lines = note.splitlines() or [""]
+        if single:  # more than one note has no single span to edit in place
+            lines = _region(run.get("id") or entry_id(run), lines,
+                            multiline=True, controls=controls)
+        else:
+            lines = [clean_text(ln) for ln in lines]
+        for line in lines:
             out.append(f"> {line}")
         out.append("")
     return "\n".join(out)
@@ -569,13 +721,21 @@ def _event_markdown(event: dict, *, controls: bool = False, day: str = "") -> st
     mark = _hidden_prefix(event)
     tools = _controls_md(event, controls)
 
-    if kind == rs.HEADING:
+    identity = event.get("id") or entry_id(event)
+    style = effective_style(event) if kind in (rs.HEADING, rs.NOTE) else ""
+    if style in (STYLE_H1, STYLE_H2):
         # "▸" marks this as the user's own section break, so it reads
         # distinctly from the automatic day headings at the same level.
-        return f"## {mark}▸ {title or text}{tools}\n"
+        line = " ".join(entry_text(event).split()) or "Section"
+        shown = _region(identity, [line], multiline=False, controls=controls)[0]
+        prefix = "# " if style == STYLE_H1 else "## ▸ "
+        return f"{prefix}{mark}{shown}{_edited_tag(event)}{tools}\n"
 
     if kind == rs.SNAPSHOT:
         head = title or "Beamline snapshot"
+        groups = [str(g) for g in event.get("groups") or [] if str(g).strip()]
+        if groups:
+            head = f"{head} ({', '.join(groups)})"
         out = [f"#### {mark}📸 {head} — {stamp}{tools}", ""]
         out += _hidden_note(event)
         out += ["| Reading | Value | Units |", "|---|---|---|"]
@@ -591,16 +751,19 @@ def _event_markdown(event: dict, *, controls: bool = False, day: str = "") -> st
         # experiment folder -- so an exported .md opens correctly in any
         # Markdown viewer once `report_images.package_markdown` has copied the
         # figures next to it. The pixels are a sidecar file; see report_images.
-        head = title or "Figure"
-        out = [f"#### {mark}🖼 {head} — {stamp}{tools}", ""]
+        head = clean_text(title or "Figure")
+        # The caption under the picture is the editable span; it rides in the
+        # alt text, which `report_render` splits back out.
+        alt = _region(identity, [head.replace("]", ")")], multiline=False, controls=controls)[0]
+        out = [f"#### {mark}🖼 {head} — {stamp}{_edited_tag(event)}{tools}", ""]
         out += _hidden_note(event)
-        out += [f"![{head}]({event.get('file') or ''})", ""]
+        out += [f"![{alt}]({event.get('file') or ''})", ""]
         return "\n".join(out)
 
     if kind == rs.AGENT:
         # Always labelled: a reader must be able to tell agent-written prose
         # from the instrument's own record at a glance.
-        out = [f"#### {mark}✨ AutoPILOT — {stamp}{tools}", ""]
+        out = [f"#### {mark}✨ AutoPILOT — {stamp}{_edited_tag(event)}{tools}", ""]
         out += _hidden_note(event)
         if title:
             out.append(f"*{title}*")
@@ -609,9 +772,19 @@ def _event_markdown(event: dict, *, controls: bool = False, day: str = "") -> st
         out.append("")
         return "\n".join(out)
 
-    out = [f"#### {mark}✎ Note — {stamp}{tools}", ""]
-    out += _hidden_note(event)
-    for line in text.splitlines() or [""]:
+    out = _hidden_note(event)
+    body = entry_text(event) if kind in (rs.HEADING, rs.NOTE) else text
+    lines = body.splitlines() or [""]
+    if kind in (rs.HEADING, rs.NOTE):
+        lines = _region(identity, lines, multiline=True, controls=controls)
+    else:
+        lines = [clean_text(ln) for ln in lines]
+    # No header: the note is the thing, led by when it was entered. The stamp
+    # stays outside the editable span, and the block controls ride on the last
+    # line so a right-click anywhere in the note still resolves to its entry.
+    lines[0] = f"{mark}[{stamp}] {lines[0]}"
+    lines[-1] = f"{lines[-1]}{_edited_tag(event)}{tools}"
+    for line in lines:
         out.append(f"> {line}")
     out.append("")
     return "\n".join(out)
@@ -727,6 +900,11 @@ def render_markdown(
     # Notes are attached before anything is filtered, so hiding a run takes the
     # note that belongs to it along rather than leaving it floating unmoored.
     loose = attach_notes(runs, [e for e in events if e.get("kind") != rs.RUN])
+    # After attach_notes, so its dedupe still sees the original text; the
+    # corrected note replaces whatever the run came with, never adds to it.
+    for run in runs:
+        if run.get("notes_override"):
+            run["notes"] = list(run["notes_override"])
     items = visible_entries(runs + loose, show_hidden=show_hidden)
 
     # Earliest capture time, not the first entry in reading order: moving a

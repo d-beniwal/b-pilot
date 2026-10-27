@@ -58,6 +58,40 @@ _COMMENT_OPEN = re.compile(r"^\s*<!--")
 _COMMENT_CLOSE = re.compile(r"-->")
 
 
+# An in-place-editable span, as `report_builder._region` writes it:
+# ``⟦id|m⟧text⟦/⟧``. Rendered as plain escaped text between two named anchors
+# (`body:<id>:<m|s>` on the first character, `end:<id>` on a zero-width space
+# after the last) that `report_view` reads back to know where typing is
+# allowed. Plain, not Markdown-styled: what is shown is exactly what is edited,
+# so committing an edit can never silently strip someone's `*` or `_`.
+_REGION = re.compile("\u27e6([^|\u27e7]+)\\|([ms])\u27e7(.*?)\u27e6/\u27e7", re.S)
+
+
+def _inline_lines(text: str) -> str:
+    return "<br>".join(_inline(ln) for ln in text.split("\n"))
+
+
+def _inline_marked(lines: list[str]) -> str:
+    """Like ``"<br>".join(_inline(l) for l in lines)``, honouring edit regions."""
+    text = "\n".join(lines)
+    out, pos = [], 0
+    for match in _REGION.finditer(text):
+        out.append(_inline_lines(text[pos:match.start()]))
+        ident, kind, inner = match.groups()
+        out.append(
+            f'<a name="body:{html.escape(ident, quote=True)}:{kind}">'
+            f'{html.escape(inner).replace(chr(10), "<br>")}</a>'
+            f'<a name="end:{html.escape(ident, quote=True)}">&#8203;</a>'
+        )
+        pos = match.end()
+    out.append(_inline_lines(text[pos:]))
+    return "".join(out)
+
+
+def _strip_regions(text: str) -> str:
+    return _REGION.sub(lambda m: m.group(3), text)
+
+
 def _inline(text: str) -> str:
     """Escape `text`, then apply the inline Markdown spans we emit."""
     out = html.escape(text)
@@ -111,7 +145,7 @@ def _heading_html(level: int, text: str) -> str:
     )
     return (
         f'<div style="color:{color}; font-size:{size}px; font-weight:bold; '
-        f'margin-top:{S.px(14)}px; margin-bottom:{S.px(4)}px;{rule}">{_inline(text)}</div>'
+        f'margin-top:{S.px(14)}px; margin-bottom:{S.px(4)}px;{rule}">{_inline_marked([text])}</div>'
     )
 
 
@@ -144,7 +178,7 @@ def _code_html(lines: list[str]) -> str:
 
 def _quote_html(lines: list[str]) -> str:
     """A blockquote -- what run notes and error summaries render as."""
-    body = "<br>".join(_inline(ln) for ln in lines)
+    body = _inline_marked(lines)
     return (
         f'<table width="100%" cellspacing="0" cellpadding="6" '
         f'style="margin:{S.px(4)}px 0;"><tr>'
@@ -168,7 +202,8 @@ def _image_html(
     rather than a broken box -- a lab record should say what it lost.
     """
     path = os.path.join(base_dir, rel) if base_dir else rel
-    caption = _inline(alt) if alt else ""
+    caption = _inline_marked([alt]) if alt else ""
+    alt = _strip_regions(alt)
 
     if not os.path.isfile(path):
         return (
