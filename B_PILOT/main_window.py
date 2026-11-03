@@ -22,6 +22,7 @@ from . import style as S
 from .console_panel import ConsolePanel
 from .contacq_popup import ContAcqButton
 from .mode_buttons import ModeButtonBar
+from . import blade_bridge
 from .panel_ribbon import CollapsibleDockPanel
 from .panel_ribbon import PanelRibbon
 from .plan_runner import PlanRunnerPanel
@@ -149,12 +150,23 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self._main_split, 1)
         clay.addLayout(row, 1)
 
-        self.setCentralWidget(central)
+        # Two full-window screens: the Runner (everything above) and BLADE
+        # (built lazily on first use, see _show_blade). The console, queue and
+        # recorder live on the Runner page and keep running while BLADE is up.
+        self._stack = QtWidgets.QStackedWidget()
+        self._stack.addWidget(central)
+        self._blade_screen = None
+        self._blade_hidden_docks: dict[str, bool] = {}
+        self._blade_docks_hiding = False
+        self.setCentralWidget(self._stack)
 
         # Data Viewer: always has a ribbon tab, launched as a detached,
         # independent process (see _toggle_viewer) -- best-effort highlight
         # only (pid-liveness polling), since it isn't a panel of this window.
         self.ribbon.register_tab("viewer", "Data Viewer", self._toggle_viewer)
+        # BLADE: agent-driven automation screen (optional, ../blade). Its ribbon
+        # tab is always present; without BLADE it opens a diagnostic instead.
+        self.ribbon.register_tab("blade", "BLADE", self._show_blade)
 
         # AutoPILOT chat dock: created once, right here, whenever AutoPILOT/
         # is present and importable (see B_PILOT/autopilot_bridge.py) -- its
@@ -708,9 +720,43 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.autopilot_chat is not None:
             self.autopilot_chat.setVisible(bool(config.get("autopilot_enabled")))
 
+    def _show_blade(self) -> None:
+        """Swap the whole window to the BLADE screen (docks are hidden without
+        touching their persisted visibility; _show_runner restores them)."""
+        if not blade_bridge.AVAILABLE:
+            QtWidgets.QMessageBox.information(self, "BLADE", "\n\n".join(blade_bridge.diagnose()))
+            return
+        if self._blade_screen is None:
+            from .blade_screen import BladeScreen
+            self._blade_screen = BladeScreen(self.console, self)
+            self._blade_screen.backRequested.connect(self._show_runner)
+            self._stack.addWidget(self._blade_screen)
+        self._blade_docks_hiding = True
+        try:
+            for key, dock in (("autopilot", self.autopilot_chat), ("report", self.report)):
+                if dock is not None:
+                    self._blade_hidden_docks[key] = dock.isVisible()
+                    dock.setVisible(False)
+        finally:
+            self._blade_docks_hiding = False
+        self._stack.setCurrentWidget(self._blade_screen)
+
+    def _show_runner(self) -> None:
+        self._stack.setCurrentIndex(0)
+        self._blade_docks_hiding = True
+        try:
+            for key, dock in (("autopilot", self.autopilot_chat), ("report", self.report)):
+                if dock is not None and self._blade_hidden_docks.get(key):
+                    dock.setVisible(True)
+        finally:
+            self._blade_docks_hiding = False
+        self._blade_hidden_docks = {}
+
     def _on_autopilot_visibility_changed(self, visible: bool) -> None:
         """Keep config + the menu checkbox in sync no matter what changed
         the dock's visibility (ribbon tab, title-bar close, menu, config)."""
+        if self._blade_docks_hiding:
+            return
         config.update({"autopilot_enabled": visible})
         act = getattr(self, "_act_autopilot", None)
         if act is not None:
@@ -747,6 +793,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_report_visibility_changed(self, visible: bool) -> None:
         """Keep config + the menu checkbox in sync however the dock was hidden
         (ribbon tab, title-bar close, menu) -- mirrors the AutoPILOT pair above."""
+        if self._blade_docks_hiding:
+            return
         config.update({"report_enabled": visible})
         act = getattr(self, "_act_report", None)
         if act is not None:
