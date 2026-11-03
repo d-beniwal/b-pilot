@@ -1,33 +1,48 @@
 {
   "bluesky_root": "/home/beams12/S1IDUSER/bluesky",
-  "plans_dir": "/home/beams12/S1IDUSER/bluesky/instrument/plans",
-  "import_root": "/home/beams12/S1IDUSER/bluesky",
   "default_plan_file": "scans_stationary.py",
   "visible_plan_files": [
+    "s1id_plans/user_plans/mpe_sep26.py",
     "scan_skeletons.py",
     "scans_standard.py",
-    "scans_stationary.py",
-    "presets/s1id/grid_stepx_sw_samC.json",
-    "presets/s1id/grid_stepx_sw_samE.json",
-    "presets/s1id/grid_sweepx_sw_samC.json",
-    "presets/s1id/grid_sweepx_sw_samE.json",
-    "presets/s1id/hedmscan_sw_samC.json",
-    "presets/s1id/hedmscan_sw_samE.json",
-    "presets/s1id/pfscan_sw_samC.json",
-    "presets/s1id/pfscan_sw_samE.json",
-    "presets/s1id/tomoscan_sw_samC.json",
-    "presets/s1id/tomoscan_sw_samE.json"
+    "scans_stationary.py"
   ],
   "bluesky_startup": "",
   "send_import_line": false,
   "keep_kernel_on_exit": true,
+  "beamline": "s1id",
   "use_screen": true,
-  "launch_mode": "embedded",
   "dm_experiment": "",
-  "experiment_data_root": "~/new_data",
   "setup_file": "exp_setup.yml",
-  "script_run_mode": "screen",
-  "ui_scale": 1.0,
+  "ui_scale": 1.2,
+  "theme": "light",
+  "font_family": "system",
+  "autopilot_enabled": false,
+  "report_enabled": false,
+  "report_title": "",
+  "report_excluded_plans": [
+    "cont_acq"
+  ],
+  "report_snapshot_groups": [
+    {
+      "name": "RunEngine",
+      "items": [
+        {
+          "label": "RE state",
+          "expr": "RE.state",
+          "kind": "str",
+          "units": ""
+        },
+        {
+          "label": "scan_id",
+          "expr": "RE.md.get('scan_id')",
+          "kind": "raw",
+          "units": ""
+        }
+      ]
+    }
+  ],
+  "midas_bridge_enabled": true,
   "device_search_paths": [
     "instrument/devices/s1id_devices"
   ],
@@ -39,49 +54,50 @@
       "ge4": true,
       "ge5": true,
       "gh1": true,
+      "hydra": true,
       "pg1": true,
       "pg5": true,
       "pixirad": true,
       "s1varex1": true
     },
     "motor": {
-      "am_chamber": true,
-      "am_sam": true,
-      "attenB": true,
-      "attenC": true,
-      "cmu": true,
-      "con": true,
-      "cork": true,
-      "d2C": true,
-      "d2E": true,
-      "ff": true,
-      "foilB": true,
-      "hem": true,
-      "lens1C": true,
-      "lens1E": true,
-      "lens2C": true,
-      "lens2E": true,
-      "lens3C": true,
-      "lens3E": true,
-      "lens4B": true,
-      "lens4C": true,
-      "lens4E": true,
-      "lens5B": true,
+      "am_chamber": false,
+      "am_sam": false,
+      "attenB": false,
+      "attenC": false,
+      "cmu": false,
+      "con": false,
+      "cork": false,
+      "d2C": false,
+      "d2E": false,
+      "ff": false,
+      "foilB": false,
+      "hem": false,
+      "lens1C": false,
+      "lens1E": false,
+      "lens2C": false,
+      "lens2E": false,
+      "lens3C": false,
+      "lens3E": false,
+      "lens4B": false,
+      "lens4C": false,
+      "lens4E": false,
+      "lens5B": false,
       "mts": true,
       "mts_tbl": true,
-      "rf_coil": true,
-      "rf_sam": true,
-      "rf_tube": true,
+      "rf_coil": false,
+      "rf_sam": false,
+      "rf_tube": false,
       "samC": true,
       "samE": true,
-      "saxs": true,
-      "saxs_pin": true,
-      "tomoB": true,
-      "tomoC": true,
-      "tomoEds": true,
-      "tomoEus": true,
-      "vff": true,
-      "wheelE": true
+      "saxs": false,
+      "saxs_pin": false,
+      "tomoB": false,
+      "tomoC": false,
+      "tomoEds": false,
+      "tomoEus": false,
+      "vff": false,
+      "wheelE": false
     },
     "other": {
       "acromag": true,
@@ -106,7 +122,6 @@
       "GEZYNQ_IN": true,
       "GEZYNQ_STR_IN": true,
       "hem_energy": true,
-      "hydra5": true,
       "HydraStringSeq": true,
       "int_monitor": true,
       "intg_time": true,
@@ -138,15 +153,15 @@
       "user_string10": true
     },
     "scaler": {
-      "beeper": true,
+      "beeper": false,
       "keyence_c": true,
       "keyence_e": true,
       "scaler1": true,
-      "scaler1_calcs": true,
+      "scaler1_calcs": false,
       "scaler1E": true,
-      "scaler2_calcs": true,
+      "scaler2_calcs": false,
       "scaler2E": true,
-      "SCALER_DICT": true,
+      "SCALER_DICT": false,
       "tilt_sensor": true
     },
     "shutter": {
@@ -164,9 +179,11 @@
       "slitEus": true
     }
   },
-  "databroker_catalog": "1id_hexm1",
-  "databroker_uri": "",
-  "databroker_nexus_dir": "",
+  "device_category_overrides": {
+    "hydra": [
+      "area_detector"
+    ]
+  },
   "plan_building_search_paths": [
     "instrument/plans/scan_hw_triggering.py",
     "instrument/plans/scan_sw_triggering.py"
@@ -176,9 +193,7 @@
     "instrument/plans/suspenders_pseudo.py",
     "instrument/plans/s1id_plans/s1id_suspenders.py"
   ],
-  "switch_to_search_paths": [
-    "instrument/plans/s1id_plans/s1id_shortcuts.py"
-  ],
+  "switch_to_search_paths": [],
   "plan_building_blocks": {
     "plan_opener": [
       "hardware_opener",
@@ -191,8 +206,8 @@
       "mixed_sweep_",
       "step_and_shoot_",
       "scaler_step_and_shoot_",
-      "tomo_step_and_shoot_",
-      "tomo_sweep_",
+      "combined_step_and_shoot_",
+      "software_sweep_",
       "scaler_sweep_",
       "step_ladder_",
       "sweep_ladder_",
@@ -228,5 +243,26 @@
       "drive_checker",
       "midas_caker"
     ]
-  }
+  },
+  "databroker_catalog": "1id_hexm1",
+  "databroker_uri": "",
+  "databroker_nexus_dir": "",
+  "queue_backend": "native",
+  "qs_zmq_control_addr": "tcp://redwood.xray.aps.anl.gov:60615",
+  "qs_zmq_info_addr": "tcp://redwood.xray.aps.anl.gov:60625",
+  "qs_user": "",
+  "qs_user_group": "primary",
+  "viewer_export_fields": {
+    "summary": true,
+    "start_metadata": true,
+    "stop_metadata": true,
+    "notes": true,
+    "file_references": true,
+    "data_preview": false
+  },
+  "plans_dir": "/home/beams12/S1IDUSER/bluesky/instrument/plans",
+  "import_root": "/home/beams12/S1IDUSER/bluesky",
+  "launch_mode": "embedded",
+  "experiment_data_root": "~/new_data",
+  "script_run_mode": "screen"
 }
