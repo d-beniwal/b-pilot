@@ -497,7 +497,20 @@ class ConsolePanel(QtWidgets.QWidget):
                 content = msg.get("content", {}) or {}
                 text = content.get("text", "")
                 parent_id = msg.get("parent_header", {}).get("msg_id")
-                if "\r" not in text or jw.from_here(msg) or not parent_id:
+                # Foreign output: any "\r" chunk is a bar redraw. Own output:
+                # qtconsole already honors a bare "\r" overwrite, but NOT the
+                # ANSI cursor-up that bluesky's bar emits after each tick, so
+                # only own chunks containing that escape need collapsing.
+                is_bar = "\r" in text and (
+                    not jw.from_here(msg) or "\x1b[" in text
+                )
+                if not parent_id:
+                    orig_handle_stream(msg)
+                    return
+                if not is_bar:
+                    # Ordinary text ends the bar block: freeze it so the next
+                    # bar redraw starts a fresh region below this text.
+                    self._progress_bars.pop(parent_id, None)
                     orig_handle_stream(msg)
                     return
                 self._handle_foreign_progress_stream(jw, parent_id, msg, text)

@@ -173,12 +173,12 @@ class ContAcqPopup(QtWidgets.QFrame):
                 row = QtWidgets.QHBoxLayout()
                 row.addWidget(QtWidgets.QLabel(name))
                 row.addStretch(1)
-                stop_btn = QtWidgets.QPushButton("×")
+                stop_btn = QtWidgets.QPushButton("STOP")
                 stop_btn.setToolTip(f"Stop continuous acquisition on {name}.")
                 stop_btn.setStyleSheet(
                     f"QPushButton{{background:{S.ERROR};color:white;"
                     f"font-weight:bold;border-radius:{S.px(4)}px;"
-                    f"padding:{S.px(2)}px {S.px(8)}px;}}"
+                    f"padding:{S.px(3)}px {S.px(14)}px;}}"
                 )
                 stop_btn.clicked.connect(lambda _c=False, n=name: self._stop(n))
                 row.addWidget(stop_btn)
