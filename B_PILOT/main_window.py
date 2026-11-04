@@ -15,7 +15,9 @@ from . import device_source
 from . import kernel_session as ks
 from . import midas_bridge
 from . import paths
+from . import plan_reload
 from . import queue_panel
+from . import queue_store
 from . import style as S
 from .console_panel import ConsolePanel
 from .contacq_popup import ContAcqButton
@@ -113,6 +115,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._contacq_btn = ContAcqButton(self.console)
         self.runner.runRequested.connect(self._on_run)
         self.runner.queueRequested.connect(self._on_queue)
+        self.runner.reloadModulesRequested.connect(self._on_reload_plan_modules)
+        self.console.executing.connect(lambda *_: self._sync_reload_button())
+        self.console.executed.connect(lambda *_: self._sync_reload_button())
         self._mode_btn.runRequested.connect(self._on_run)
         self._mode_btn.queueRequested.connect(self._on_queue)
         self.queue.copyToFormRequested.connect(self.runner.load_from_command)
@@ -511,6 +516,46 @@ class MainWindow(QtWidgets.QMainWindow):
                 config.get("midas_bridge_enabled"),
             )
 
+    # ── Reload plan modules (hot-reload in the live kernel; see plan_reload.py) ──
+
+    def _native_queue_running(self) -> bool:
+        """True while the native queue is RUNNING. The QS backend's queue runs in
+        QS's own worker, never this kernel, so it can't conflict with a reload."""
+        if self._queue_backend != "native":
+            return False
+        try:
+            return queue_store.load(config.get("beamline")).get("state") == queue_store.S_RUNNING
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _sync_reload_button(self) -> None:
+        """Enable *Reload plan modules* only while the console is up and idle.
+        (Queue state and RunEngine state are re-checked at click time.)"""
+        if not self.console.is_ready():
+            self.runner.set_reload_enabled(False, "Launch or attach the IPython session first.")
+        elif self.console.is_busy():
+            self.runner.set_reload_enabled(False, "The console is busy running a command.")
+        else:
+            self.runner.set_reload_enabled(True)
+
+    def _on_reload_plan_modules(self) -> None:
+        """Guards (console idle, native queue not running), then run the reload in
+        the kernel. The kernel itself refuses unless ``RE.state == 'idle'``."""
+        if not self.console.is_ready() or self.console.is_busy():
+            self._sync_reload_button()
+            return
+        if self._native_queue_running():
+            self.statusBar().showMessage(
+                "Reload plan modules: refused -- the queue is running. Pause/stop it first.", 8000
+            )
+            return
+        roots = [config.get("plans_dir")]
+        self.console.run_silent(plan_reload.kernel_source())
+        self.console.run_code(plan_reload.call_source(roots))
+        # The GUI side parses plan files by path (AST), so re-scan to pick up
+        # new/renamed plans and changed signatures in the form.
+        self.runner.apply_config()
+
     def _on_queue(self, command: str, notes: str, qs_item: dict) -> None:
         """Append a plan to the active queue backend (see
         ``config.get("queue_backend")`` / :func:`queue_panel.create_queue_panel`).
@@ -844,6 +889,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_shutdown.setEnabled(True)
         self._shutdown_btn.setEnabled(True)
         self.runner.set_console_ready(True)
+        self._sync_reload_button()
         self._mode_btn.set_console_ready(True)
         self._contacq_btn.set_console_ready(True)
         self.run_controls.set_console_ready(True)
@@ -990,6 +1036,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_shutdown.setEnabled(False)
         self._shutdown_btn.setEnabled(False)
         self.runner.set_console_ready(False)
+        self._sync_reload_button()
         self._mode_btn.set_console_ready(False)
         self._contacq_btn.set_console_ready(False)
         self.run_controls.set_console_ready(False)

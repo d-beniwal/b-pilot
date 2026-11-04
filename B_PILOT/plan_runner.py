@@ -72,6 +72,10 @@ class PlanRunnerPanel(QtWidgets.QWidget):
     # stop both being minimized -- lets the main window reclaim the freed
     # width for the console (see main_window._on_runner_both_minimized).
     bothPanelsMinimizedChanged = QtCore.pyqtSignal(bool)
+    # "Reload plan modules" clicked -- the main window owns the guards (console
+    # idle, native queue not running) and the kernel round trip; see
+    # main_window._on_reload_plan_modules / plan_reload.py.
+    reloadModulesRequested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None, *, ribbon=None) -> None:
         """Build the panel and populate the file browser + plan dropdown.
@@ -148,6 +152,10 @@ class PlanRunnerPanel(QtWidgets.QWidget):
         refresh_btn = QtWidgets.QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_files)
         fb_card.body.addWidget(refresh_btn)
+        self._reload_btn = QtWidgets.QPushButton("Reload plan modules")
+        self._reload_btn.clicked.connect(self.reloadModulesRequested.emit)
+        fb_card.body.addWidget(self._reload_btn)
+        self.set_reload_enabled(False, "Launch or attach the IPython session first.")
         fb_card.setMinimumWidth(S.px(170))
         split.addWidget(fb_card)
         if self._ribbon is not None:
@@ -297,6 +305,16 @@ class PlanRunnerPanel(QtWidgets.QWidget):
             "" if ready else "Launch the IPython session first (top toolbar)."
         )
         self._live_validate()
+
+    def set_reload_enabled(self, enabled: bool, tip: str = "") -> None:
+        """Enable/disable *Reload plan modules*; `tip` says why when disabled."""
+        self._reload_btn.setEnabled(enabled)
+        self._reload_btn.setToolTip(
+            "Re-import plan files that changed on disk into the running kernel "
+            "(plans folder only -- devices and the RunEngine are never reloaded). "
+            "Only while the RunEngine is idle and no queue is running."
+            if enabled else tip
+        )
 
     # ── Edit mode (hand-edit the command before sending) ────────────────────────
 

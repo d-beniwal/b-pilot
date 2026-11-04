@@ -653,6 +653,13 @@ class ConsolePanel(QtWidgets.QWidget):
         # kernel; kernel_client.execute() would not echo.
         self.jupyter_widget.execute(source=src, hidden=False)
 
+    def run_silent(self, src: str) -> None:
+        """Run `src` in the kernel with no echo, output, history or prompt bump
+        (e.g. defining a helper function that a later visible cell calls).
+        The kernel executes requests in order, so a following `run_code()` sees it."""
+        if src and src.strip() and self.is_running():
+            self.kernel_client.execute(src, silent=True, store_history=False)
+
     def run_code_sequence(self, blocks: list[str], stop_on_error: bool = True) -> None:
         """Run `blocks` one at a time -- e.g. an auto-injected `det_startup`
         ahead of the real plan, or the configured startup commands -- each as
